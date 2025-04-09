@@ -1,0 +1,30 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Environment variables (¡IMPORTANTE!)
+.env
+*.env.* # Ignora archivos como .env.local, .env.development, .env.production
+backend/.env # Sé explícito para el backend .env
+frontend/.env # Sé explícito si planeas usar uno en frontend
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
