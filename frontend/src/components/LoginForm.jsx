@@ -2,61 +2,85 @@
 import React, { useState } from 'react';
 import axios from 'axios';
 
-const LoginForm = () => {
-  // 1. Cambia 'email' por 'username' en el estado inicial
+// --- ACEPTA LA PROP onLoginSuccess ---
+// Usamos desestructuración de props ({ onLoginSuccess }) para obtenerla directamente
+const LoginForm = ({ onLoginSuccess }) => {
+  // El estado sigue siendo para username y password
   const [formData, setFormData] = useState({
-    username: '', // <--- Cambio aquí
+    username: '',
     password: '',
   });
-  const [message, setMessage] = useState('');
+  // Mantenemos un estado para mensajes de *error* en este componente
+  const [errorMessage, setErrorMessage] = useState('');
 
+  // Manejador de cambios en los inputs (sin cambios)
   const handleChange = (e) => {
     setFormData({
       ...formData,
-      [e.target.name]: e.target.value, // Esto sigue funcionando igual
+      [e.target.name]: e.target.value,
     });
   };
 
+  // Manejador del envío del formulario
   const handleSubmit = async (e) => {
-    e.preventDefault();
-    setMessage('');
-    // El console log ahora mostrará { username: '...', password: '...' }
+    e.preventDefault(); // Previene recarga de página
+    setErrorMessage(''); // Limpia errores anteriores al intentar de nuevo
     console.log('Datos a enviar (Login):', formData);
 
     try {
       const apiUrl = 'http://localhost:5001/api/auth/login';
-      // axios enviará el objeto formData que ahora contiene 'username'
+      // Hacemos la petición POST al backend con username y password
       const response = await axios.post(apiUrl, formData);
 
-      console.log('Respuesta del servidor:', response.data);
-      setMessage('¡Acceso exitoso!');
-      // localStorage.setItem('token', response.data.token); // Para cuando implementes JWT
-      // Limpia el estado con username
-      setFormData({ username: '', password: '' }); // <--- Cambio aquí
+      console.log('Respuesta del servidor (Login):', response.data);
+
+      // --- LÓGICA DE ÉXITO ---
+      // Verificamos si la respuesta contiene los datos del usuario esperados
+      if (response.data && response.data.user && response.data.user.username) {
+        // SI TODO OK: Llama a la función onLoginSuccess pasada desde App.jsx
+        // y le enviamos los datos del usuario (y el token, si lo hubiera)
+        onLoginSuccess(response.data.user /*, response.data.token */); // Descomenta token cuando lo implementes
+
+        // Ya no necesitamos limpiar el formulario aquí ni mostrar mensaje de éxito,
+        // porque App.jsx se encargará de cambiar la vista.
+        // setFormData({ username: '', password: '' }); // Opcional
+
+      } else {
+        // Si la respuesta del backend (aún siendo exitosa 2xx) no tiene los datos esperados
+        console.error("Login exitoso (2xx) pero faltan datos del usuario en la respuesta:", response.data);
+        setErrorMessage("Ocurrió un problema al cargar tu sesión. Intenta de nuevo.");
+      }
+      // ------------------------
+
     } catch (error) {
+      // --- LÓGICA DE ERROR ---
       console.error('Error en el login:', error);
-      setMessage(error.response?.data?.message || 'Error en el acceso. Verifica tus credenciales.');
+      // Muestra el mensaje de error específico del backend si está disponible,
+      // o uno genérico si no.
+      setErrorMessage(error.response?.data?.message || 'Error en el acceso. Verifica tus credenciales o inténtalo más tarde.');
+      // ------------------------
     }
   };
 
+  // --- RENDERIZADO DEL COMPONENTE ---
   return (
     <div>
       <h2>Acceder</h2>
       <form onSubmit={handleSubmit}>
-        {/* 2. Modifica este bloque completo */}
+        {/* Input para Username (sin cambios respecto a la versión anterior con username) */}
         <div>
-          {/* Cambia el texto del label y el htmlFor */}
           <label htmlFor="login-username">Usuario:</label>
           <input
-            type="text" // Cambia el tipo a 'text'
-            id="login-username" // Cambia el id
-            name="username" // ¡MUY IMPORTANTE! Cambia el name a 'username'
-            value={formData.username} // Lee del estado formData.username
+            type="text"
+            id="login-username"
+            name="username"
+            value={formData.username}
             onChange={handleChange}
             required
+            aria-describedby={errorMessage ? "login-error-message" : undefined} // Para accesibilidad
           />
         </div>
-        {/* El bloque de la contraseña no necesita cambios */}
+        {/* Input para Contraseña (sin cambios) */}
         <div>
           <label htmlFor="login-password">Contraseña:</label>
           <input
@@ -66,11 +90,13 @@ const LoginForm = () => {
             value={formData.password}
             onChange={handleChange}
             required
+            aria-describedby={errorMessage ? "login-error-message" : undefined} // Para accesibilidad
           />
         </div>
         <button type="submit">Acceder</button>
       </form>
-      {message && <p>{message}</p>}
+      {/* Mostramos SÓLO los mensajes de ERROR aquí */}
+      {errorMessage && <p id="login-error-message" style={{ color: 'red' }}>{errorMessage}</p>}
     </div>
   );
 };
