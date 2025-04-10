@@ -2,9 +2,7 @@
 import React, { useState } from 'react';
 import axios from 'axios';
 
-// --- Obtén la URL base de la API desde las variables de entorno ---
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5001';
-// --------------------------------------------------------------
 
 const LoginForm = ({ onLoginSuccess }) => {
   const [formData, setFormData] = useState({
@@ -12,7 +10,7 @@ const LoginForm = ({ onLoginSuccess }) => {
     password: '',
   });
   const [errorMessage, setErrorMessage] = useState('');
-  const [isLoading, setIsLoading] = useState(false); // Opcional: para indicar carga
+  const [isLoading, setIsLoading] = useState(false);
 
   const handleChange = (e) => {
     setFormData({
@@ -24,23 +22,22 @@ const LoginForm = ({ onLoginSuccess }) => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setErrorMessage('');
-    setIsLoading(true); // Inicia carga
+    setIsLoading(true);
     console.log('Datos a enviar (Login):', formData);
-    console.log(`Usando API URL base: ${API_BASE_URL}`); // Verifica la URL usada
+    console.log(`Usando API URL base: ${API_BASE_URL}`);
 
     try {
-      // --- Construye la URL dinámicamente ---
+      // --- RUTA CORRECTA ---
       const apiUrl = `${API_BASE_URL}/api/auth/login`;
-      // -------------------------------------
-
+      // --------------------
       const response = await axios.post(apiUrl, formData);
 
       console.log('Respuesta del servidor (Login):', response.data);
 
-      if (response.data && response.data.user && response.data.user.username) {
-        onLoginSuccess(response.data.user /*, response.data.token */);
+      if (response.data && response.data.user && response.data.token) {
+        onLoginSuccess(response.data.user, response.data.token);
       } else {
-        console.error("Login exitoso (2xx) pero faltan datos del usuario en la respuesta:", response.data);
+        console.error("Login exitoso (2xx) pero faltan datos (user/token) en la respuesta:", response.data);
         setErrorMessage("Ocurrió un problema al cargar tu sesión. Intenta de nuevo.");
       }
 
@@ -58,7 +55,7 @@ const LoginForm = ({ onLoginSuccess }) => {
         setErrorMessage(`Error inesperado: ${error.message}`);
       }
     } finally {
-       setIsLoading(false); // Termina carga
+       setIsLoading(false);
     }
   };
 
@@ -75,7 +72,7 @@ const LoginForm = ({ onLoginSuccess }) => {
             value={formData.username}
             onChange={handleChange}
             required
-            disabled={isLoading} // Deshabilita mientras carga
+            disabled={isLoading}
             aria-describedby={errorMessage ? "login-error-message" : undefined}
           />
         </div>
@@ -88,16 +85,14 @@ const LoginForm = ({ onLoginSuccess }) => {
             value={formData.password}
             onChange={handleChange}
             required
-            disabled={isLoading} // Deshabilita mientras carga
+            disabled={isLoading}
             aria-describedby={errorMessage ? "login-error-message" : undefined}
           />
         </div>
-        {/* Muestra "Accediendo..." en el botón si isLoading es true */}
         <button type="submit" disabled={isLoading}>
            {isLoading ? 'Accediendo...' : 'Acceder'}
         </button>
       </form>
-      {/* Mostramos SÓLO los mensajes de ERROR aquí */}
       {errorMessage && <p id="login-error-message" style={{ color: 'red' }}>{errorMessage}</p>}
     </div>
   );

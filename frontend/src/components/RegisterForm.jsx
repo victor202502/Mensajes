@@ -2,11 +2,7 @@
 import React, { useState } from 'react';
 import axios from 'axios';
 
-// --- Obtén la URL base de la API desde las variables de entorno ---
-// Vite expone las variables con prefijo VITE_ en import.meta.env
-// Usamos un fallback a localhost:5001 para desarrollo local si .env no está configurado
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5001';
-// --------------------------------------------------------------
 
 const RegisterForm = () => {
   const [formData, setFormData] = useState({
@@ -14,7 +10,7 @@ const RegisterForm = () => {
     password: '',
   });
   const [message, setMessage] = useState('');
-  const [isLoading, setIsLoading] = useState(false); // Opcional: para indicar carga
+  const [isLoading, setIsLoading] = useState(false);
 
   const handleChange = (e) => {
     setFormData({
@@ -26,24 +22,22 @@ const RegisterForm = () => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setMessage('');
-    setIsLoading(true); // Inicia carga
+    setIsLoading(true);
     console.log('Datos a enviar (Registro):', formData);
-    console.log(`Usando API URL base: ${API_BASE_URL}`); // Verifica la URL usada
+    console.log(`Usando API URL base: ${API_BASE_URL}`);
 
     try {
-      // --- Construye la URL dinámicamente ---
+      // --- RUTA CORRECTA ---
       const apiUrl = `${API_BASE_URL}/api/auth/register`;
-      // -------------------------------------
-
+      // --------------------
       const response = await axios.post(apiUrl, formData);
 
       console.log('Respuesta del servidor (Registro):', response.data);
       setMessage(response.data?.message || '¡Registro exitoso!');
-      setFormData({ username: '', password: '' }); // Limpiar formulario
+      setFormData({ username: '', password: '' });
 
     } catch (error) {
       console.error('Error en el registro:', error);
-      // Mostrar error detallado si es posible
       if (error.response) {
         console.error('Error Data:', error.response.data);
         console.error('Error Status:', error.response.status);
@@ -56,7 +50,7 @@ const RegisterForm = () => {
         setMessage(`Error inesperado: ${error.message}`);
       }
     } finally {
-      setIsLoading(false); // Termina carga (tanto en éxito como en error)
+      setIsLoading(false);
     }
   };
 
@@ -74,7 +68,7 @@ const RegisterForm = () => {
             onChange={handleChange}
             required
             minLength="3"
-            disabled={isLoading} // Deshabilita mientras carga
+            disabled={isLoading}
           />
         </div>
         <div>
@@ -87,15 +81,13 @@ const RegisterForm = () => {
             onChange={handleChange}
             required
             minLength="6"
-            disabled={isLoading} // Deshabilita mientras carga
+            disabled={isLoading}
           />
         </div>
-        {/* Muestra "Registrando..." en el botón si isLoading es true */}
         <button type="submit" disabled={isLoading}>
           {isLoading ? 'Registrando...' : 'Registrarse'}
         </button>
       </form>
-      {/* Muestra mensajes de éxito o error */}
       {message && <p>{message}</p>}
     </div>
   );
