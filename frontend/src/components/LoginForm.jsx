@@ -2,18 +2,18 @@
 import React, { useState } from 'react';
 import axios from 'axios';
 
-// --- ACEPTA LA PROP onLoginSuccess ---
-// Usamos desestructuración de props ({ onLoginSuccess }) para obtenerla directamente
+// --- Obtén la URL base de la API desde las variables de entorno ---
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5001';
+// --------------------------------------------------------------
+
 const LoginForm = ({ onLoginSuccess }) => {
-  // El estado sigue siendo para username y password
   const [formData, setFormData] = useState({
     username: '',
     password: '',
   });
-  // Mantenemos un estado para mensajes de *error* en este componente
   const [errorMessage, setErrorMessage] = useState('');
+  const [isLoading, setIsLoading] = useState(false); // Opcional: para indicar carga
 
-  // Manejador de cambios en los inputs (sin cambios)
   const handleChange = (e) => {
     setFormData({
       ...formData,
@@ -21,53 +21,51 @@ const LoginForm = ({ onLoginSuccess }) => {
     });
   };
 
-  // Manejador del envío del formulario
   const handleSubmit = async (e) => {
-    e.preventDefault(); // Previene recarga de página
-    setErrorMessage(''); // Limpia errores anteriores al intentar de nuevo
+    e.preventDefault();
+    setErrorMessage('');
+    setIsLoading(true); // Inicia carga
     console.log('Datos a enviar (Login):', formData);
+    console.log(`Usando API URL base: ${API_BASE_URL}`); // Verifica la URL usada
 
     try {
-      const apiUrl = 'http://localhost:5001/api/auth/login';
-      // Hacemos la petición POST al backend con username y password
+      // --- Construye la URL dinámicamente ---
+      const apiUrl = `${API_BASE_URL}/api/auth/login`;
+      // -------------------------------------
+
       const response = await axios.post(apiUrl, formData);
 
       console.log('Respuesta del servidor (Login):', response.data);
 
-      // --- LÓGICA DE ÉXITO ---
-      // Verificamos si la respuesta contiene los datos del usuario esperados
       if (response.data && response.data.user && response.data.user.username) {
-        // SI TODO OK: Llama a la función onLoginSuccess pasada desde App.jsx
-        // y le enviamos los datos del usuario (y el token, si lo hubiera)
-        onLoginSuccess(response.data.user /*, response.data.token */); // Descomenta token cuando lo implementes
-
-        // Ya no necesitamos limpiar el formulario aquí ni mostrar mensaje de éxito,
-        // porque App.jsx se encargará de cambiar la vista.
-        // setFormData({ username: '', password: '' }); // Opcional
-
+        onLoginSuccess(response.data.user /*, response.data.token */);
       } else {
-        // Si la respuesta del backend (aún siendo exitosa 2xx) no tiene los datos esperados
         console.error("Login exitoso (2xx) pero faltan datos del usuario en la respuesta:", response.data);
         setErrorMessage("Ocurrió un problema al cargar tu sesión. Intenta de nuevo.");
       }
-      // ------------------------
 
     } catch (error) {
-      // --- LÓGICA DE ERROR ---
       console.error('Error en el login:', error);
-      // Muestra el mensaje de error específico del backend si está disponible,
-      // o uno genérico si no.
-      setErrorMessage(error.response?.data?.message || 'Error en el acceso. Verifica tus credenciales o inténtalo más tarde.');
-      // ------------------------
+      if (error.response) {
+        console.error('Error Data:', error.response.data);
+        console.error('Error Status:', error.response.status);
+        setErrorMessage(error.response.data?.message || `Error del servidor (${error.response.status})`);
+      } else if (error.request) {
+        console.error('No se recibió respuesta:', error.request);
+        setErrorMessage('No se pudo conectar al servidor. Inténtalo más tarde.');
+      } else {
+        console.error('Error de configuración Axios:', error.message);
+        setErrorMessage(`Error inesperado: ${error.message}`);
+      }
+    } finally {
+       setIsLoading(false); // Termina carga
     }
   };
 
-  // --- RENDERIZADO DEL COMPONENTE ---
   return (
     <div>
       <h2>Acceder</h2>
       <form onSubmit={handleSubmit}>
-        {/* Input para Username (sin cambios respecto a la versión anterior con username) */}
         <div>
           <label htmlFor="login-username">Usuario:</label>
           <input
@@ -77,10 +75,10 @@ const LoginForm = ({ onLoginSuccess }) => {
             value={formData.username}
             onChange={handleChange}
             required
-            aria-describedby={errorMessage ? "login-error-message" : undefined} // Para accesibilidad
+            disabled={isLoading} // Deshabilita mientras carga
+            aria-describedby={errorMessage ? "login-error-message" : undefined}
           />
         </div>
-        {/* Input para Contraseña (sin cambios) */}
         <div>
           <label htmlFor="login-password">Contraseña:</label>
           <input
@@ -90,10 +88,14 @@ const LoginForm = ({ onLoginSuccess }) => {
             value={formData.password}
             onChange={handleChange}
             required
-            aria-describedby={errorMessage ? "login-error-message" : undefined} // Para accesibilidad
+            disabled={isLoading} // Deshabilita mientras carga
+            aria-describedby={errorMessage ? "login-error-message" : undefined}
           />
         </div>
-        <button type="submit">Acceder</button>
+        {/* Muestra "Accediendo..." en el botón si isLoading es true */}
+        <button type="submit" disabled={isLoading}>
+           {isLoading ? 'Accediendo...' : 'Acceder'}
+        </button>
       </form>
       {/* Mostramos SÓLO los mensajes de ERROR aquí */}
       {errorMessage && <p id="login-error-message" style={{ color: 'red' }}>{errorMessage}</p>}
