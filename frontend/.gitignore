@@ -28,3 +28,5 @@ frontend/.env # Sé explícito si planeas usar uno en frontend
 *.njsproj
 *.sln
 *.sw?
+
+readme.txt
