@@ -1,0 +1,28 @@
+/* frontend/src/components/CreateGroupModal.css */
+.create-group-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding: 0 var(--space-lg) var(--space-lg);
+}
+
+.create-group-members {
+  padding: 0;
+}
+
+.create-group-member-item {
+  cursor: pointer;
+}
+
+.create-group-checkbox {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  border: 1.5px solid var(--border-subtle);
+  transition: background-color var(--transition-fast), border-color var(--transition-fast);
+}
+.create-group-checkbox.is-checked {
+  background: linear-gradient(135deg, var(--gradient-own-start), var(--gradient-own-end));
+  border-color: transparent;
+}

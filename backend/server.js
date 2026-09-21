@@ -13,6 +13,11 @@ const jwt = require('jsonwebtoken');
 // Middleware de autenticación HTTP (Asegúrate de crear este archivo si lo usas)
 const authMiddleware = require('./middleware/authMiddleware'); // <<< CAMBIO: Importa el middleware
 
+// <<< NEU (Phase 1): reines In-Memory-Modul für den Online-Status der Benutzer >>>
+const presence = require('./presence');
+// <<< NEU (Phase 4): Rollen-/Rechteprüfung für Gruppen >>>
+const groupPermissions = require('./groupPermissions');
+
 // --- Lista de Orígenes Permitidos (para CORS) ---
 const allowedOrigins = [
     'http://localhost:5173', // Tu frontend dev
@@ -89,6 +94,21 @@ io.on('connection', (socket) => {
    socket.join(userIdString);
    console.log(`Usuario ${username} (ID: ${userId}) unido a la sala ${userIdString}`);
 
+   // <<< NEU (Phase 1): Online-Präsenz registrieren und an alle Clients broadcasten >>>
+   presence.markOnline(userId, socket.id);
+   io.emit('userStatusChanged', { userId, isOnline: true });
+
+   // <<< NEU (Phase 4): eigenen Gruppenräumen beitreten (IIFE, damit der restliche,
+   //     synchrone Verbindungsaufbau unten nicht auf die DB-Antwort warten muss) >>>
+   (async () => {
+     try {
+       const myGroups = await db.query('SELECT group_id FROM group_members WHERE user_id = $1', [userId]);
+       myGroups.rows.forEach((row) => socket.join(`group_${row.group_id}`));
+     } catch (err) {
+       console.error(`Error al unir a ${username} a sus salas de grupo:`, err);
+     }
+   })();
+
    // Escuchar evento 'sendMessage' { recipientUsername, content }
    socket.on('sendMessage', async ({ recipientUsername, content }) => {
      console.log(`Mensaje recibido de ${username} (ID: ${userId}) para ${recipientUsername}: ${content}`);
@@ -119,6 +139,20 @@ io.on('connection', (socket) => {
        const recipientId = recipientCheck.rows[0].id;
        const recipientIdString = recipientId.toString();
 
+       // <<< NEU (Phase 2): Nachrichten sind jetzt auf akzeptierte Kontakte beschränkt.
+       //     Bestehende Konversationen wurden per Migration (002) automatisch als
+       //     akzeptierte Kontakte übernommen, damit hier nichts Bestehendes bricht. >>>
+       const contactCheck = await db.query(
+         `SELECT status FROM contacts
+          WHERE (requester_id = $1 AND addressee_id = $2)
+             OR (requester_id = $2 AND addressee_id = $1)`,
+         [userId, recipientId]
+       );
+       if (contactCheck.rows.length === 0 || contactCheck.rows[0].status !== 'accepted') {
+         console.log(`Nachricht von ${username} an ${trimmedRecipient} blockiert: keine akzeptierte Kontaktbeziehung.`);
+         return socket.emit('messageError', { error: 'Ihr müsst Kontakte sein, um Nachrichten auszutauschen.' });
+       }
+
        // 2. Guardar mensaje en DB (con recipient_id)
        const newMessage = await db.query(
          'INSERT INTO messages (content, sender_id, recipient_id) VALUES ($1, $2, $3) RETURNING id, content, sender_id, recipient_id, created_at',
@@ -130,6 +164,9 @@ io.on('connection', (socket) => {
          id: newMessage.rows[0].id,
          content: newMessage.rows[0].content,
          createdAt: newMessage.rows[0].created_at,
+         // <<< NEU (Phase 3): gleiche Form wie die Nachrichten aus /api/messages >>>
+         deliveredAt: null,
+         readAt: null,
          sender: { id: userId, username: username }, // Usa datos del socket
          recipient: { id: recipientId, username: trimmedRecipient } // Usa datos encontrados
        };
@@ -150,10 +187,96 @@ io.on('connection', (socket) => {
      }
    });
 
+   // <<< NEU (Phase 3): "Benutzer schreibt..." — leitet nur an akzeptierte Kontakte weiter >>>
+   socket.on('typing', async ({ recipientId }) => {
+     const targetId = parseInt(recipientId, 10);
+     if (!Number.isInteger(targetId)) return;
+     try {
+       const contactCheck = await db.query(
+         `SELECT 1 FROM contacts
+          WHERE ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
+            AND status = 'accepted'`,
+         [userId, targetId]
+       );
+       if (contactCheck.rows.length > 0) {
+         io.to(targetId.toString()).emit('partnerTyping', { userId });
+       }
+     } catch (err) {
+       console.error(`Error al reenviar evento 'typing' de ${username} a ${targetId}:`, err);
+     }
+   });
+
+   // <<< NEU (Phase 3): Zustellbestätigung — Empfänger-Client bestätigt den Erhalt einer Nachricht >>>
+   socket.on('ackDelivered', async ({ messageId }) => {
+     const id = parseInt(messageId, 10);
+     if (!Number.isInteger(id)) return;
+     try {
+       const result = await db.query(
+         `UPDATE messages SET delivered_at = NOW()
+          WHERE id = $1 AND delivered_at IS NULL
+          RETURNING sender_id`,
+         [id]
+       );
+       if (result.rows.length > 0) {
+         const senderId = result.rows[0].sender_id;
+         io.to(senderId.toString()).emit('messageStatusUpdate', { messageId: id, status: 'delivered' });
+       }
+     } catch (err) {
+       console.error(`Error al confirmar entrega del mensaje ${id}:`, err);
+     }
+   });
+
+   // <<< NEU (Phase 4): Nachricht an eine Gruppe senden >>>
+   socket.on('sendGroupMessage', async ({ groupId, content }) => {
+     const gId = parseInt(groupId, 10);
+     const trimmedContent = content?.trim();
+     if (!Number.isInteger(gId) || !trimmedContent) {
+       return socket.emit('messageError', { error: 'Ungültige Gruppennachricht.' });
+     }
+     try {
+       // TEMPORÄR (Debug Phase 4): siehe Analysepunkt 5/8.
+       console.log('[DEBUG Phase 4] sendGroupMessage: userId (Socket) =', userId, ', gId (empfangen) =', gId);
+       const role = await groupPermissions.getMemberRole(gId, userId);
+       console.log('[DEBUG Phase 4] sendGroupMessage: getMemberRole ergab =', role);
+       if (!role) {
+         return socket.emit('messageError', { error: 'Du bist kein Mitglied dieser Gruppe.' });
+       }
+       const inserted = await db.query(
+         `INSERT INTO group_messages (group_id, sender_id, content) VALUES ($1, $2, $3)
+          RETURNING id, created_at`,
+         [gId, userId, trimmedContent]
+       );
+       const groupMessageToSend = {
+         id: inserted.rows[0].id,
+         groupId: gId,
+         content: trimmedContent,
+         createdAt: inserted.rows[0].created_at,
+         sender: { id: userId, username },
+       };
+       io.to(`group_${gId}`).emit('newGroupMessage', groupMessageToSend);
+     } catch (err) {
+       console.error(`Error al enviar mensaje de ${username} al grupo ${gId}:`, err);
+       socket.emit('messageError', { error: 'Fehler beim Senden der Gruppennachricht.' });
+     }
+   });
+
    // Manejar desconexión
-   socket.on('disconnect', (reason) => {
+   socket.on('disconnect', async (reason) => {
      console.log(`Cliente desconectado: ${socket.id}, Usuario: ${username} (ID: ${userId}), Razón: ${reason}`);
      // No es necesario 'leave', al desconectar se sale automáticamente de las salas
+
+     // <<< NEU (Phase 1): Online-Präsenz nur entfernen, wenn dies der letzte Socket
+     //     dieses Benutzers war (mehrere Tabs/Geräte möglich) >>>
+     const wentFullyOffline = presence.markOffline(userId, socket.id);
+     if (wentFullyOffline) {
+       io.emit('userStatusChanged', { userId, isOnline: false });
+       // <<< NEU (Phase 3): "letzter Zugriff" nur aktualisieren, wenn wirklich offline >>>
+       try {
+         await db.query('UPDATE users SET last_seen_at = NOW() WHERE id = $1', [userId]);
+       } catch (err) {
+         console.error(`Error al actualizar last_seen_at para Usuario ID ${userId}:`, err);
+       }
+     }
    });
 });
 
@@ -285,6 +408,7 @@ app.get('/api/messages', authMiddleware, async (req, res) => {
        // <<< CAMBIO: Consulta SQL modificada con WHERE para filtrar por sender_id O recipient_id
        const result = await db.query(`
           SELECT m.id, m.content, m.created_at AS "createdAt",
+                 m.delivered_at AS "deliveredAt", m.read_at AS "readAt",
                  s.id AS sender_id, s.username AS sender_username,
                  r.id AS recipient_id, r.username AS recipient_username
           FROM messages m
@@ -298,6 +422,8 @@ app.get('/api/messages', authMiddleware, async (req, res) => {
        // El mapeo de datos sigue siendo el mismo
        const messages = result.rows.map(row => ({
           id: row.id, content: row.content, createdAt: row.createdAt,
+          // <<< NEU (Phase 3): Zustellungs-/Lesestatus, rein additiv >>>
+          deliveredAt: row.deliveredAt, readAt: row.readAt,
           sender: { id: row.sender_id, username: row.sender_username },
           // Incluye destinatario solo si existe en la fila (gracias al LEFT JOIN y la condición WHERE)
           recipient: row.recipient_id ? { id: row.recipient_id, username: row.recipient_username } : null
@@ -312,6 +438,724 @@ app.get('/api/messages', authMiddleware, async (req, res) => {
        res.status(500).json({ message: "Error al cargar el historial de mensajes." });
     }
  });
+
+
+// -----------------------------------------------------------------------------
+// 9b. NEU (Phase 1) — Rutas para die Konversationsliste
+// Rein additiv: keine bestehende Route wird verändert oder entfernt.
+// -----------------------------------------------------------------------------
+
+// --- Ruta: estado online de todos los usuarios ---
+app.get('/api/users/status', authMiddleware, async (req, res) => {
+  try {
+    const onlineUserIds = presence.getOnlineUserIds();
+    res.status(200).json({ onlineUserIds });
+  } catch (err) {
+    console.error('Error al obtener el estado online:', err);
+    res.status(500).json({ message: 'Fehler beim Abrufen des Online-Status.' });
+  }
+});
+
+// --- Ruta: contador de mensajes sin leer, agrupado por remitente ---
+app.get('/api/conversations/unread', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  try {
+    const result = await db.query(
+      `SELECT sender_id, COUNT(*)::int AS unread_count
+       FROM messages
+       WHERE recipient_id = $1 AND read_at IS NULL
+       GROUP BY sender_id`,
+      [currentUserId]
+    );
+    const unreadCounts = result.rows.map((row) => ({
+      partnerId: row.sender_id,
+      unreadCount: row.unread_count,
+    }));
+    res.status(200).json(unreadCounts);
+  } catch (err) {
+    console.error(`Error al obtener contadores de no leídos para Usuario ID ${currentUserId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Abrufen der ungelesenen Nachrichten.' });
+  }
+});
+
+// --- Ruta: marcar como leídos todos los mensajes de un remitente concreto ---
+app.post('/api/conversations/:partnerId/read', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const partnerId = parseInt(req.params.partnerId, 10);
+
+  if (!Number.isInteger(partnerId)) {
+    return res.status(400).json({ message: 'Ungültige partnerId.' });
+  }
+
+  try {
+    const result = await db.query(
+      `UPDATE messages
+       SET read_at = NOW()
+       WHERE sender_id = $1 AND recipient_id = $2 AND read_at IS NULL`,
+      [partnerId, currentUserId]
+    );
+    // <<< NEU (Phase 3): den Absender in Echtzeit informieren, dass seine Nachrichten gelesen wurden >>>
+    if (result.rowCount > 0) {
+      io.to(partnerId.toString()).emit('messagesRead', { readerId: currentUserId });
+    }
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al marcar como leída la conversación con ${partnerId} para Usuario ID ${currentUserId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Markieren der Konversation als gelesen.' });
+  }
+});
+
+
+// -----------------------------------------------------------------------------
+// 9c. NEU (Phase 2) — Kontakt-System
+// Rein additiv: keine bestehende Route wird verändert oder entfernt.
+// -----------------------------------------------------------------------------
+
+// --- Ruta: resumen completo (contactos, solicitudes entrantes/salientes, bloqueados) ---
+app.get('/api/contacts/overview', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  try {
+    const contactsResult = await db.query(
+      `SELECT u.id, u.username, u.last_seen_at AS "lastSeenAt"
+       FROM contacts c
+       JOIN users u ON u.id = CASE WHEN c.requester_id = $1 THEN c.addressee_id ELSE c.requester_id END
+       WHERE (c.requester_id = $1 OR c.addressee_id = $1) AND c.status = 'accepted'
+       ORDER BY u.username ASC`,
+      [currentUserId]
+    );
+    const incomingResult = await db.query(
+      `SELECT u.id, u.username
+       FROM contacts c
+       JOIN users u ON u.id = c.requester_id
+       WHERE c.addressee_id = $1 AND c.status = 'pending'
+       ORDER BY c.created_at DESC`,
+      [currentUserId]
+    );
+    const outgoingResult = await db.query(
+      `SELECT u.id, u.username
+       FROM contacts c
+       JOIN users u ON u.id = c.addressee_id
+       WHERE c.requester_id = $1 AND c.status = 'pending'
+       ORDER BY c.created_at DESC`,
+      [currentUserId]
+    );
+    const blockedResult = await db.query(
+      `SELECT u.id, u.username
+       FROM contacts c
+       JOIN users u ON u.id = c.addressee_id
+       WHERE c.requester_id = $1 AND c.status = 'blocked'
+       ORDER BY u.username ASC`,
+      [currentUserId]
+    );
+    // <<< NEU (Phase 3): Online-Status direkt an jeden Kontakt anhängen >>>
+    const contactsWithStatus = contactsResult.rows.map((row) => ({
+      ...row,
+      isOnline: presence.isOnline(row.id),
+    }));
+    res.status(200).json({
+      contacts: contactsWithStatus,
+      incoming: incomingResult.rows,
+      outgoing: outgoingResult.rows,
+      blocked: blockedResult.rows,
+    });
+  } catch (err) {
+    console.error(`Error al obtener resumen de contactos para Usuario ID ${currentUserId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Abrufen der Kontakte.' });
+  }
+});
+
+// --- Ruta: enviar solicitud de contacto ---
+app.post('/api/contacts/request', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const addresseeId = parseInt(req.body?.addresseeId, 10);
+
+  if (!Number.isInteger(addresseeId)) {
+    return res.status(400).json({ message: 'Ungültige addresseeId.' });
+  }
+  if (addresseeId === currentUserId) {
+    return res.status(400).json({ message: 'Du kannst dir nicht selbst eine Anfrage senden.' });
+  }
+
+  try {
+    const userExists = await db.query('SELECT id FROM users WHERE id = $1', [addresseeId]);
+    if (userExists.rows.length === 0) {
+      return res.status(404).json({ message: 'Benutzer nicht gefunden.' });
+    }
+
+    const existing = await db.query(
+      `SELECT status FROM contacts
+       WHERE (requester_id = $1 AND addressee_id = $2)
+          OR (requester_id = $2 AND addressee_id = $1)`,
+      [currentUserId, addresseeId]
+    );
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ message: 'Es besteht bereits eine Beziehung zu diesem Benutzer.' });
+    }
+
+    await db.query(
+      `INSERT INTO contacts (requester_id, addressee_id, status) VALUES ($1, $2, 'pending')`,
+      [currentUserId, addresseeId]
+    );
+    res.status(201).json({ success: true });
+  } catch (err) {
+    console.error(`Error al enviar solicitud de ${currentUserId} a ${addresseeId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Senden der Kontaktanfrage.' });
+  }
+});
+
+// --- Ruta: aceptar una solicitud recibida ---
+app.post('/api/contacts/:userId/accept', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const otherUserId = parseInt(req.params.userId, 10);
+  if (!Number.isInteger(otherUserId)) {
+    return res.status(400).json({ message: 'Ungültige userId.' });
+  }
+  try {
+    const result = await db.query(
+      `UPDATE contacts SET status = 'accepted', updated_at = NOW()
+       WHERE requester_id = $1 AND addressee_id = $2 AND status = 'pending'`,
+      [otherUserId, currentUserId]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: 'Keine offene Anfrage von diesem Benutzer gefunden.' });
+    }
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al aceptar solicitud de ${otherUserId} para ${currentUserId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Annehmen der Anfrage.' });
+  }
+});
+
+// --- Ruta: rechazar una solicitud recibida ---
+app.post('/api/contacts/:userId/reject', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const otherUserId = parseInt(req.params.userId, 10);
+  if (!Number.isInteger(otherUserId)) {
+    return res.status(400).json({ message: 'Ungültige userId.' });
+  }
+  try {
+    const result = await db.query(
+      `DELETE FROM contacts WHERE requester_id = $1 AND addressee_id = $2 AND status = 'pending'`,
+      [otherUserId, currentUserId]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: 'Keine offene Anfrage von diesem Benutzer gefunden.' });
+    }
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al rechazar solicitud de ${otherUserId} para ${currentUserId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Ablehnen der Anfrage.' });
+  }
+});
+
+// --- Ruta: cancelar una solicitud que YO envié ---
+app.post('/api/contacts/:userId/cancel', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const otherUserId = parseInt(req.params.userId, 10);
+  if (!Number.isInteger(otherUserId)) {
+    return res.status(400).json({ message: 'Ungültige userId.' });
+  }
+  try {
+    const result = await db.query(
+      `DELETE FROM contacts WHERE requester_id = $1 AND addressee_id = $2 AND status = 'pending'`,
+      [currentUserId, otherUserId]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: 'Keine gesendete Anfrage an diesen Benutzer gefunden.' });
+    }
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al cancelar solicitud de ${currentUserId} a ${otherUserId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Zurückziehen der Anfrage.' });
+  }
+});
+
+// --- Ruta: eliminar un contacto ya aceptado ---
+app.delete('/api/contacts/:userId', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const otherUserId = parseInt(req.params.userId, 10);
+  if (!Number.isInteger(otherUserId)) {
+    return res.status(400).json({ message: 'Ungültige userId.' });
+  }
+  try {
+    const result = await db.query(
+      `DELETE FROM contacts
+       WHERE ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
+         AND status = 'accepted'`,
+      [currentUserId, otherUserId]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: 'Kein bestehender Kontakt mit diesem Benutzer gefunden.' });
+    }
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al eliminar contacto entre ${currentUserId} y ${otherUserId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Entfernen des Kontakts.' });
+  }
+});
+
+// --- Ruta: bloquear a un usuario (sustituye cualquier relación previa) ---
+app.post('/api/contacts/:userId/block', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const otherUserId = parseInt(req.params.userId, 10);
+  if (!Number.isInteger(otherUserId)) {
+    return res.status(400).json({ message: 'Ungültige userId.' });
+  }
+  if (otherUserId === currentUserId) {
+    return res.status(400).json({ message: 'Du kannst dich nicht selbst blockieren.' });
+  }
+  try {
+    await db.query(
+      `DELETE FROM contacts
+       WHERE (requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1)`,
+      [currentUserId, otherUserId]
+    );
+    await db.query(
+      `INSERT INTO contacts (requester_id, addressee_id, status) VALUES ($1, $2, 'blocked')`,
+      [currentUserId, otherUserId]
+    );
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al bloquear a ${otherUserId} desde ${currentUserId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Blockieren des Benutzers.' });
+  }
+});
+
+// --- Ruta: desbloquear a un usuario ---
+app.post('/api/contacts/:userId/unblock', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const otherUserId = parseInt(req.params.userId, 10);
+  if (!Number.isInteger(otherUserId)) {
+    return res.status(400).json({ message: 'Ungültige userId.' });
+  }
+  try {
+    const result = await db.query(
+      `DELETE FROM contacts WHERE requester_id = $1 AND addressee_id = $2 AND status = 'blocked'`,
+      [currentUserId, otherUserId]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: 'Dieser Benutzer ist nicht blockiert.' });
+    }
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al desbloquear a ${otherUserId} desde ${currentUserId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Entsperren des Benutzers.' });
+  }
+});
+
+
+// -----------------------------------------------------------------------------
+// 9d. NEU (Phase 4) — Gruppen-System
+// Rein additiv: keine bestehende Route wird verändert oder entfernt.
+// Gruppen-Nachrichten leben bewusst in einer eigenen Tabelle (group_messages),
+// getrennt von messages — siehe migrations/004_create_groups.sql.
+// -----------------------------------------------------------------------------
+
+// --- Ruta: meine Gruppen (mit Rolle und Mitgliederzahl) ---
+app.get('/api/groups', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  try {
+    const result = await db.query(
+      `SELECT g.id, g.name, g.description, g.avatar_emoji AS "avatarEmoji",
+              gm.role,
+              (SELECT COUNT(*)::int FROM group_members gm2 WHERE gm2.group_id = g.id) AS "memberCount"
+       FROM groups g
+       JOIN group_members gm ON gm.group_id = g.id
+       WHERE gm.user_id = $1
+       ORDER BY g.name ASC`,
+      [currentUserId]
+    );
+    res.status(200).json(result.rows);
+  } catch (err) {
+    console.error(`Error al obtener grupos de Usuario ID ${currentUserId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Abrufen der Gruppen.' });
+  }
+});
+
+// <<< FIX (verificación externa, punto 1) — REIHENFOLGE WICHTIG: Express prüft
+//     Routen in Registrierungsreihenfolge. Diese beiden Routen MÜSSEN vor
+//     GET /api/groups/:groupId stehen — sonst fängt :groupId Anfragen wie
+//     "/api/groups/messages" ab und behandelt "messages" fälschlich als
+//     groupId (führt zu 400 "Ungültige groupId", die eigentliche Route wurde
+//     nie erreicht). Bitte beim Hinzufügen weiterer /api/groups/<literal>-
+//     Routen IMMER vor :groupId einfügen. >>>
+
+// --- Ruta: gesamter Nachrichtenverlauf aller eigenen Gruppen (analog zu /api/messages) ---
+app.get('/api/groups/messages', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  try {
+    const result = await db.query(
+      `SELECT gm.id, gm.group_id AS "groupId", gm.content, gm.created_at AS "createdAt",
+              u.id AS sender_id, u.username AS sender_username
+       FROM group_messages gm
+       JOIN users u ON u.id = gm.sender_id
+       WHERE gm.group_id IN (SELECT group_id FROM group_members WHERE user_id = $1)
+       ORDER BY gm.created_at ASC`,
+      [currentUserId]
+    );
+    const messages = result.rows.map((row) => ({
+      id: row.id,
+      groupId: row.groupId,
+      content: row.content,
+      createdAt: row.createdAt,
+      sender: { id: row.sender_id, username: row.sender_username },
+    }));
+    res.status(200).json(messages);
+  } catch (err) {
+    console.error(`Error al obtener mensajes de grupo para Usuario ID ${currentUserId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Laden der Gruppennachrichten.' });
+  }
+});
+
+// --- Ruta: meine "zuletzt gelesen"-Zeiger für alle Gruppen ---
+app.get('/api/groups/read-state', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  try {
+    const result = await db.query(
+      `SELECT group_id AS "groupId", last_read_at AS "lastReadAt" FROM group_read_state WHERE user_id = $1`,
+      [currentUserId]
+    );
+    res.status(200).json(result.rows);
+  } catch (err) {
+    console.error(`Error al obtener estado de lectura de grupos para Usuario ID ${currentUserId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Abrufen des Lesestatus.' });
+  }
+});
+
+// --- Ruta: Detail einer Gruppe inkl. Mitgliederliste mit Rollen ---
+app.get('/api/groups/:groupId', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const groupId = parseInt(req.params.groupId, 10);
+  if (!Number.isInteger(groupId)) {
+    return res.status(400).json({ message: 'Ungültige groupId.' });
+  }
+  try {
+    const myRole = await groupPermissions.getMemberRole(groupId, currentUserId);
+    if (!myRole) {
+      return res.status(403).json({ message: 'Du bist kein Mitglied dieser Gruppe.' });
+    }
+    const groupResult = await db.query(
+      `SELECT id, name, description, avatar_emoji AS "avatarEmoji", created_by AS "createdBy"
+       FROM groups WHERE id = $1`,
+      [groupId]
+    );
+    if (groupResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Gruppe nicht gefunden.' });
+    }
+    const membersResult = await db.query(
+      `SELECT u.id, u.username, gm.role
+       FROM group_members gm
+       JOIN users u ON u.id = gm.user_id
+       WHERE gm.group_id = $1
+       ORDER BY CASE gm.role WHEN 'owner' THEN 0 WHEN 'moderator' THEN 1 ELSE 2 END, u.username ASC`,
+      [groupId]
+    );
+    res.status(200).json({
+      ...groupResult.rows[0],
+      myRole,
+      members: membersResult.rows,
+    });
+  } catch (err) {
+    console.error(`Error al obtener detalle del grupo ${groupId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Abrufen der Gruppe.' });
+  }
+});
+
+// --- Ruta: Gruppe erstellen ---
+app.post('/api/groups', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const name = req.body?.name?.trim();
+  const description = req.body?.description?.trim() || null;
+  const avatarEmoji = req.body?.avatarEmoji || null;
+  // FIX (verificación externa, punto 2): antes se aplicaba Number.isInteger()
+  // directamente sobre los valores recibidos, lo que descarta en silencio
+  // cualquier ID que llegue como string numérico (p. ej. "5"). Ahora se
+  // convierte primero con parseInt y solo después se valida el resultado.
+  const memberIds = Array.isArray(req.body?.memberIds)
+    ? req.body.memberIds.map((id) => parseInt(id, 10)).filter((id) => Number.isInteger(id))
+    : [];
+
+  // TEMPORÄR (Debug Phase 4): siehe Analysepunkt 8 — bitte vor dem Entfernen
+  // bestätigen, dass "ausgewählte memberIds" und "tatsächlich eingefügt" für
+  // jeden Testlauf exakt übereinstimmen.
+  console.log('[DEBUG Phase 4] POST /api/groups: authentifizierter Benutzer =', currentUserId, req.user.username);
+  console.log('[DEBUG Phase 4] POST /api/groups: von Express empfangene memberIds =', memberIds);
+
+  if (!name || name.length < 2) {
+    return res.status(400).json({ message: 'Der Gruppenname muss mindestens 2 Zeichen lang sein.' });
+  }
+
+  try {
+    // <<< FIX (Phase 4 Debug) — Punkt 7 der Analyse (Transaktionen/Commit/
+    //     Rollback): Gruppe + Owner-Mitgliedschaft + initiale Mitglieder liefen
+    //     bisher als drei getrennte, nacheinander awaitete Anfragen OHNE
+    //     gemeinsame Transaktion. Schlug eine davon fehl (z. B. ein einzelnes
+    //     Mitglied), blieben Gruppe und Owner trotzdem in der DB stehen, obwohl
+    //     der Client einen 500er sah — ein inkonsistenter Zwischenzustand.
+    //     Jetzt läuft alles atomar: entweder alles zusammen oder gar nichts. >>>
+    const insertedMemberIds = [];
+    const groupId = await db.withTransaction(async (txDb) => {
+      const groupResult = await txDb.query(
+        `INSERT INTO groups (name, description, avatar_emoji, created_by) VALUES ($1, $2, $3, $4) RETURNING id`,
+        [name, description, avatarEmoji, currentUserId]
+      );
+      const newGroupId = groupResult.rows[0].id;
+      console.log('[DEBUG Phase 4] POST /api/groups: neue groupId =', newGroupId); // TEMPORÄR (Debug Phase 4)
+
+      const ownerResult = await txDb.query(
+        `INSERT INTO group_members (group_id, user_id, role) VALUES ($1, $2, 'owner') RETURNING user_id, role`,
+        [newGroupId, currentUserId]
+      );
+      console.log('[DEBUG Phase 4] POST /api/groups: Owner-Zeile eingefügt =', ownerResult.rows[0]); // TEMPORÄR (Debug Phase 4)
+
+      // Nur Kontakte des Erstellers dürfen initial hinzugefügt werden (gleiche
+      // Vertrauensgrenze wie beim späteren Einladen, siehe unten).
+      for (const memberId of memberIds) {
+        if (memberId === currentUserId) continue;
+        const contactCheck = await txDb.query(
+          `SELECT 1 FROM contacts WHERE ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1)) AND status = 'accepted'`,
+          [currentUserId, memberId]
+        );
+        if (contactCheck.rows.length > 0) {
+          await txDb.query(
+            `INSERT INTO group_members (group_id, user_id, role) VALUES ($1, $2, 'member') ON CONFLICT DO NOTHING`,
+            [newGroupId, memberId]
+          );
+          insertedMemberIds.push(memberId);
+        } else {
+          console.warn('[DEBUG Phase 4] POST /api/groups: memberId', memberId, 'übersprungen (kein akzeptierter Kontakt von', currentUserId, ')');
+        }
+      }
+      return newGroupId;
+    });
+
+    console.log('[DEBUG Phase 4] POST /api/groups: tatsächlich eingefügte Mitglieder-IDs =', insertedMemberIds); // TEMPORÄR (Debug Phase 4)
+
+    // Socket-Räume erst NACH erfolgreichem Commit beitreten lassen (sonst
+    // könnten Räume für eine Gruppe vergeben werden, die durch einen
+    // Rollback am Ende doch nicht existiert).
+    io.in(currentUserId.toString()).socketsJoin(`group_${groupId}`);
+    insertedMemberIds.forEach((memberId) => {
+      io.in(memberId.toString()).socketsJoin(`group_${groupId}`);
+    });
+    // FIX (verificación externa, punto 3): fehlte bisher — ohne dieses Event
+    // sahen frisch eingeladene Mitglieder die neue Gruppe erst nach einem
+    // manuellen Neuladen. Jetzt identisch zum Verhalten von
+    // POST /api/groups/:groupId/members (Einladen NACH der Erstellung).
+    io.to(`group_${groupId}`).emit('groupUpdated', { groupId });
+
+    res.status(201).json({ id: groupId });
+  } catch (err) {
+    console.error(`Error al crear grupo para Usuario ID ${currentUserId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Erstellen der Gruppe.' });
+  }
+});
+
+// --- Ruta: Gruppe bearbeiten (Name/Beschreibung/Avatar) ---
+app.patch('/api/groups/:groupId', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const groupId = parseInt(req.params.groupId, 10);
+  if (!Number.isInteger(groupId)) {
+    return res.status(400).json({ message: 'Ungültige groupId.' });
+  }
+  try {
+    const role = await groupPermissions.getMemberRole(groupId, currentUserId);
+    if (!groupPermissions.canManageGroup(role)) {
+      return res.status(403).json({ message: 'Keine Berechtigung, diese Gruppe zu bearbeiten.' });
+    }
+    const name = req.body?.name?.trim();
+    const description = req.body?.description?.trim();
+    const avatarEmoji = req.body?.avatarEmoji;
+
+    await db.query(
+      `UPDATE groups SET
+         name = COALESCE(NULLIF($1, ''), name),
+         description = COALESCE($2, description),
+         avatar_emoji = COALESCE($3, avatar_emoji),
+         updated_at = NOW()
+       WHERE id = $4`,
+      [name, description, avatarEmoji, groupId]
+    );
+    io.to(`group_${groupId}`).emit('groupUpdated', { groupId });
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al editar grupo ${groupId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Bearbeiten der Gruppe.' });
+  }
+});
+
+// --- Ruta: Gruppe löschen (nur Owner) ---
+app.delete('/api/groups/:groupId', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const groupId = parseInt(req.params.groupId, 10);
+  if (!Number.isInteger(groupId)) {
+    return res.status(400).json({ message: 'Ungültige groupId.' });
+  }
+  try {
+    const role = await groupPermissions.getMemberRole(groupId, currentUserId);
+    if (!groupPermissions.isOwner(role)) {
+      return res.status(403).json({ message: 'Nur der Owner kann die Gruppe löschen.' });
+    }
+    await db.query('DELETE FROM groups WHERE id = $1', [groupId]); // CASCADE räumt members/messages/read_state mit auf
+    io.to(`group_${groupId}`).emit('groupDeleted', { groupId });
+    io.socketsLeave(`group_${groupId}`);
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al eliminar grupo ${groupId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Löschen der Gruppe.' });
+  }
+});
+
+// --- Ruta: Mitglied hinzufügen/einladen (nur eigene Kontakte) ---
+app.post('/api/groups/:groupId/members', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const groupId = parseInt(req.params.groupId, 10);
+  const newMemberId = parseInt(req.body?.userId, 10);
+  if (!Number.isInteger(groupId) || !Number.isInteger(newMemberId)) {
+    return res.status(400).json({ message: 'Ungültige ID.' });
+  }
+  try {
+    const role = await groupPermissions.getMemberRole(groupId, currentUserId);
+    if (!groupPermissions.canManageGroup(role)) {
+      return res.status(403).json({ message: 'Keine Berechtigung, Mitglieder einzuladen.' });
+    }
+    const contactCheck = await db.query(
+      `SELECT 1 FROM contacts WHERE ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1)) AND status = 'accepted'`,
+      [currentUserId, newMemberId]
+    );
+    if (contactCheck.rows.length === 0) {
+      return res.status(400).json({ message: 'Du kannst nur eigene Kontakte einladen.' });
+    }
+    await db.query(
+      `INSERT INTO group_members (group_id, user_id, role) VALUES ($1, $2, 'member') ON CONFLICT DO NOTHING`,
+      [groupId, newMemberId]
+    );
+    io.in(newMemberId.toString()).socketsJoin(`group_${groupId}`);
+    io.to(`group_${groupId}`).emit('groupUpdated', { groupId });
+    res.status(201).json({ success: true });
+  } catch (err) {
+    console.error(`Error al añadir miembro ${newMemberId} al grupo ${groupId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Einladen des Mitglieds.' });
+  }
+});
+
+// --- Ruta: Mitglied entfernen (kicken) ---
+app.delete('/api/groups/:groupId/members/:userId', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const groupId = parseInt(req.params.groupId, 10);
+  const targetUserId = parseInt(req.params.userId, 10);
+  if (!Number.isInteger(groupId) || !Number.isInteger(targetUserId)) {
+    return res.status(400).json({ message: 'Ungültige ID.' });
+  }
+  try {
+    const actorRole = await groupPermissions.getMemberRole(groupId, currentUserId);
+    const targetRole = await groupPermissions.getMemberRole(groupId, targetUserId);
+    if (!targetRole) {
+      return res.status(404).json({ message: 'Dieser Benutzer ist kein Mitglied der Gruppe.' });
+    }
+    if (!groupPermissions.canKick(actorRole, targetRole)) {
+      return res.status(403).json({ message: 'Keine Berechtigung, dieses Mitglied zu entfernen.' });
+    }
+    await db.query('DELETE FROM group_members WHERE group_id = $1 AND user_id = $2', [groupId, targetUserId]);
+    io.in(targetUserId.toString()).socketsLeave(`group_${groupId}`);
+    io.to(`group_${groupId}`).emit('groupUpdated', { groupId });
+    io.in(targetUserId.toString()).emit('groupUpdated', { groupId, removed: true });
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al expulsar a ${targetUserId} del grupo ${groupId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Entfernen des Mitglieds.' });
+  }
+});
+
+// --- Ruta: Gruppe verlassen ---
+app.post('/api/groups/:groupId/leave', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const groupId = parseInt(req.params.groupId, 10);
+  if (!Number.isInteger(groupId)) {
+    return res.status(400).json({ message: 'Ungültige groupId.' });
+  }
+  try {
+    const myRole = await groupPermissions.getMemberRole(groupId, currentUserId);
+    if (!myRole) {
+      return res.status(404).json({ message: 'Du bist kein Mitglied dieser Gruppe.' });
+    }
+
+    await db.query('DELETE FROM group_members WHERE group_id = $1 AND user_id = $2', [groupId, currentUserId]);
+    io.in(currentUserId.toString()).socketsLeave(`group_${groupId}`);
+
+    const remaining = await db.query('SELECT user_id, role FROM group_members WHERE group_id = $1', [groupId]);
+
+    if (remaining.rows.length === 0) {
+      // Letztes Mitglied verlässt die Gruppe -> aufräumen
+      await db.query('DELETE FROM groups WHERE id = $1', [groupId]);
+      io.socketsLeave(`group_${groupId}`);
+    } else if (myRole === 'owner') {
+      // <<< Design-Entscheidung: beim Verlassen des Owners übernimmt automatisch
+      //     das dienstälteste Mitglied (bevorzugt ein Moderator) die Rolle 'owner',
+      //     damit keine Gruppe ohne Owner zurückbleibt. >>>
+      const nextOwner = remaining.rows.find((m) => m.role === 'moderator') || remaining.rows[0];
+      await db.query(`UPDATE group_members SET role = 'owner' WHERE group_id = $1 AND user_id = $2`, [groupId, nextOwner.user_id]);
+      io.to(`group_${groupId}`).emit('groupUpdated', { groupId });
+    } else {
+      io.to(`group_${groupId}`).emit('groupUpdated', { groupId });
+    }
+
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al abandonar grupo ${groupId} (Usuario ${currentUserId}):`, err);
+    res.status(500).json({ message: 'Fehler beim Verlassen der Gruppe.' });
+  }
+});
+
+// --- Ruta: Rolle eines Mitglieds ändern (befördern/degradieren, nur Owner) ---
+app.patch('/api/groups/:groupId/members/:userId/role', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const groupId = parseInt(req.params.groupId, 10);
+  const targetUserId = parseInt(req.params.userId, 10);
+  const newRole = req.body?.role;
+  if (!Number.isInteger(groupId) || !Number.isInteger(targetUserId)) {
+    return res.status(400).json({ message: 'Ungültige ID.' });
+  }
+  if (newRole !== 'moderator' && newRole !== 'member') {
+    return res.status(400).json({ message: "Rolle muss 'moderator' oder 'member' sein." });
+  }
+  try {
+    const actorRole = await groupPermissions.getMemberRole(groupId, currentUserId);
+    if (!groupPermissions.isOwner(actorRole)) {
+      return res.status(403).json({ message: 'Nur der Owner kann Rollen ändern.' });
+    }
+    const targetRole = await groupPermissions.getMemberRole(groupId, targetUserId);
+    if (!targetRole || targetRole === 'owner') {
+      return res.status(400).json({ message: 'Ungültiges Zielmitglied.' });
+    }
+    await db.query('UPDATE group_members SET role = $1 WHERE group_id = $2 AND user_id = $3', [newRole, groupId, targetUserId]);
+    io.to(`group_${groupId}`).emit('groupUpdated', { groupId });
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al cambiar rol de ${targetUserId} en grupo ${groupId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Ändern der Rolle.' });
+  }
+});
+
+// --- Ruta: eine Gruppe als gelesen markieren ---
+app.post('/api/groups/:groupId/read', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const groupId = parseInt(req.params.groupId, 10);
+  if (!Number.isInteger(groupId)) {
+    return res.status(400).json({ message: 'Ungültige groupId.' });
+  }
+  try {
+    await db.query(
+      `INSERT INTO group_read_state (group_id, user_id, last_read_at) VALUES ($1, $2, NOW())
+       ON CONFLICT (group_id, user_id) DO UPDATE SET last_read_at = NOW()`,
+      [groupId, currentUserId]
+    );
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al marcar grupo ${groupId} como leído para Usuario ID ${currentUserId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Markieren der Gruppe als gelesen.' });
+  }
+});
 
 
 // -----------------------------------------------------------------------------

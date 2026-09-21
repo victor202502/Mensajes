@@ -1,42 +1,183 @@
-#root {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
+/* frontend/src/App.css */
+
+/* ---------- Auth (Login/Register) ---------- */
+.auth-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-lg);
+  background:
+    radial-gradient(circle at 15% 20%, rgba(124, 58, 237, 0.14), transparent 42%),
+    radial-gradient(circle at 85% 80%, rgba(139, 92, 246, 0.1), transparent 42%),
+    var(--bg-primary);
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 400px;
+  padding: var(--space-xl);
+  border-radius: var(--radius-xl);
+  background: rgba(30, 41, 59, 0.55);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: var(--shadow-lg);
+  animation: fadeInUp 0.4s ease-out;
+}
+
+.auth-logo {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: var(--space-lg);
+}
+
+.auth-logo-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, var(--gradient-own-start), var(--gradient-own-end));
+  color: #ffffff;
+  font-size: 1.4rem;
+  box-shadow: var(--shadow-md);
+}
+
+.auth-logo-text {
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--text-primary);
+}
+
+.auth-title {
   text-align: center;
+  margin: 0 0 4px;
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--text-primary);
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: filter 300ms;
-}
-.logo:hover {
-  filter: drop-shadow(0 0 2em #646cffaa);
-}
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafbaa);
+.auth-subtitle {
+  text-align: center;
+  margin: 0 0 var(--space-lg);
+  color: var(--text-secondary);
+  font-size: 0.88rem;
 }
 
-@keyframes logo-spin {
-  from {
-    transform: rotate(0deg);
+.auth-switch-btn {
+  margin-top: var(--space-lg);
+  background: none;
+  border: none;
+  color: var(--accent-hover);
+  cursor: pointer;
+  display: block;
+  width: 100%;
+  text-align: center;
+  font-size: 0.85rem;
+  padding: 6px;
+  transition: color var(--transition-fast);
+}
+.auth-switch-btn:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
+}
+
+/* ---------- App Shell ---------- */
+.app-container {
+  display: flex;
+  height: 100vh;
+  width: 100%;
+  background-color: var(--bg-primary);
+  overflow: hidden;
+}
+
+.chat-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+}
+
+.app-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--border-subtle);
+  background-color: var(--bg-sidebar);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.2);
+  flex-shrink: 0;
+}
+
+.app-topbar-user {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.app-topbar-user-info {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.app-topbar-username {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.app-topbar-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+
+/* ---------- Responsive ---------- */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .user-list {
+    width: 240px;
+    min-width: 240px;
   }
-  to {
-    transform: rotate(360deg);
+}
+
+@media (max-width: 768px) {
+  .auth-card {
+    padding: var(--space-lg);
   }
-}
 
-@media (prefers-reduced-motion: no-preference) {
-  a:nth-of-type(2) .logo {
-    animation: logo-spin infinite 20s linear;
+  .app-topbar {
+    padding: var(--space-sm) var(--space-md);
   }
-}
 
-.card {
-  padding: 2em;
-}
+  .app-topbar-username {
+    font-size: 0.85rem;
+  }
 
-.read-the-docs {
-  color: #888;
+  .user-list {
+    display: flex;
+    width: 100%;
+    min-width: 100%;
+  }
+
+  .chat-area {
+    display: none;
+    width: 100%;
+  }
+
+  .app-container.chat-active .user-list {
+    display: none;
+  }
+
+  .app-container.chat-active .chat-area {
+    display: flex;
+  }
 }

@@ -49,6 +49,28 @@ module.exports = {
     }
   },
 
+  // <<< FIX (Phase 4 Debug): Transaktions-Helfer, additiv — ändert nichts an query().
+  //     Nimmt einen Client aus dem Pool, führt BEGIN/COMMIT bzw. ROLLBACK bei
+  //     Fehlern aus und gibt den Client danach IMMER zurück an den Pool.
+  //     Der Callback erhält ein Objekt mit derselben query()-Signatur, aber
+  //     gebunden an genau diesen einen Client (wichtig: mehrere Abfragen
+  //     innerhalb derselben Transaktion müssen über dieselbe Verbindung laufen). >>>
+  withTransaction: async (callback) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const txDb = { query: (text, params) => client.query(text, params) };
+      const result = await callback(txDb);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  },
+
   // También puedes exportar el pool si necesitas un control más avanzado (ej. transacciones)
   // pool: pool
 };

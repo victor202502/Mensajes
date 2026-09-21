@@ -1,0 +1,20 @@
+/* frontend/src/components/Welcome.css */
+.welcome-card {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: var(--space-xl);
+  text-align: center;
+  color: var(--text-primary);
+  box-shadow: var(--shadow-md);
+}
+
+.welcome-card h2 {
+  margin: 0 0 var(--space-sm);
+  font-weight: 600;
+}
+
+.welcome-card p {
+  color: var(--text-secondary);
+  margin: 0 0 var(--space-lg);
+}

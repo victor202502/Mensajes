@@ -1,6 +1,7 @@
 // frontend/src/components/RegisterForm.jsx
 import React, { useState } from 'react';
 import axios from 'axios';
+import './AuthForm.css';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5001';
 
@@ -78,49 +79,47 @@ const RegisterForm = ({ onRegisterSuccess, onAuthFailure }) => {
   };
 
   return (
-    <div>
-      {/* El <h2> está en App.jsx, así que no se necesita aquí */}
-      {/* <h2>Registrierung</h2> */}
-      <form onSubmit={handleSubmit}>
-        <div>
-          {/* <<< CAMBIO: Texto de etiqueta traducido >>> */}
-          <label htmlFor="register-username">Benutzername:</label>
-          <input
-            type="text"
-            id="register-username"
-            name="username"
-            value={formData.username}
-            onChange={handleChange}
-            required
-            minLength="3" // Requisito del backend
-            disabled={isLoading}
-            aria-describedby={errorMessage ? "register-error-message" : successMessage ? "register-success-message" : undefined}
-          />
-        </div>
-        <div>
-           {/* <<< CAMBIO: Texto de etiqueta traducido >>> */}
-          <label htmlFor="register-password">Passwort:</label>
-          <input
-            type="password"
-            id="register-password"
-            name="password"
-            value={formData.password}
-            onChange={handleChange}
-            required
-            minLength="6" // Requisito del backend
-            disabled={isLoading}
-            aria-describedby={errorMessage ? "register-error-message" : successMessage ? "register-success-message" : undefined}
-          />
-        </div>
-        <button type="submit" disabled={isLoading}>
-          {/* <<< CAMBIO: Textos del botón traducidos >>> */}
-          {isLoading ? 'Registriere...' : 'Registrieren'}
-        </button>
-      </form>
+    <form onSubmit={handleSubmit} className="auth-form">
+      <div className="form-group">
+        {/* <<< CAMBIO: Texto de etiqueta traducido >>> */}
+        <label htmlFor="register-username">Benutzername:</label>
+        <input
+          type="text"
+          id="register-username"
+          name="username"
+          value={formData.username}
+          onChange={handleChange}
+          required
+          minLength="3" // Requisito del backend
+          disabled={isLoading}
+          aria-describedby={errorMessage ? "register-error-message" : successMessage ? "register-success-message" : undefined}
+          className="form-input"
+        />
+      </div>
+      <div className="form-group">
+         {/* <<< CAMBIO: Texto de etiqueta traducido >>> */}
+        <label htmlFor="register-password">Passwort:</label>
+        <input
+          type="password"
+          id="register-password"
+          name="password"
+          value={formData.password}
+          onChange={handleChange}
+          required
+          minLength="6" // Requisito del backend
+          disabled={isLoading}
+          aria-describedby={errorMessage ? "register-error-message" : successMessage ? "register-success-message" : undefined}
+          className="form-input"
+        />
+      </div>
+      <button type="submit" disabled={isLoading} className="form-submit-btn">
+        {/* <<< CAMBIO: Textos del botón traducidos >>> */}
+        {isLoading ? 'Registriere...' : 'Registrieren'}
+      </button>
       {/* <<< CAMBIO: Mostrar mensajes de error o éxito >>> */}
-      {errorMessage && <p id="register-error-message" style={{ color: 'red', marginTop: '10px' }}>{errorMessage}</p>}
-      {successMessage && <p id="register-success-message" style={{ color: 'green', marginTop: '10px' }}>{successMessage}</p>}
-    </div>
+      {errorMessage && <p id="register-error-message" className="form-message form-message-error">{errorMessage}</p>}
+      {successMessage && <p id="register-success-message" className="form-message form-message-success">{successMessage}</p>}
+    </form>
   );
 };
 

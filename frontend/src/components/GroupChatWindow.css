@@ -1,0 +1,15 @@
+/* frontend/src/components/GroupChatWindow.css */
+/* Ergänzt ChatWindow.css nur um das, was für Gruppen zusätzlich gebraucht wird. */
+
+.group-message-sender {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--accent-hover);
+  margin-bottom: 2px;
+}
+
+.group-member-count-icon {
+  font-size: 0.85em;
+  vertical-align: -1px;
+  margin-right: 3px;
+}

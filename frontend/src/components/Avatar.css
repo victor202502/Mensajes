@@ -1,0 +1,37 @@
+/* frontend/src/components/Avatar.css */
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-full);
+  color: #ffffff;
+  font-weight: 600;
+  flex-shrink: 0;
+  user-select: none;
+}
+.avatar-sm { width: 32px; height: 32px; font-size: 0.75rem; }
+.avatar-md { width: 40px; height: 40px; font-size: 0.9rem; }
+.avatar-lg { width: 56px; height: 56px; font-size: 1.25rem; }
+
+/* NEU (Phase 1): Wrapper + Status-Punkt für den Online-Status */
+.avatar-wrapper {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.avatar-status-dot {
+  position: absolute;
+  bottom: -1px;
+  right: -1px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid var(--bg-primary);
+  background-color: var(--status-offline);
+  transition: background-color var(--transition-base);
+}
+
+.avatar-status-dot.is-online {
+  background-color: var(--status-online);
+}

@@ -1,0 +1,91 @@
+/* frontend/src/components/GroupInfoPanel.css */
+/* Ergänzt ContactsPanel.css/AuthForm.css nur um das, was für die Gruppeninfo zusätzlich gebraucht wird. */
+
+.group-info-panel {
+  max-width: 440px;
+}
+
+.group-info-summary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+  padding: 0 var(--space-lg) var(--space-md);
+}
+
+.group-info-name {
+  margin: 4px 0 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.group-info-description {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  max-width: 320px;
+}
+
+.group-edit-trigger {
+  margin-top: 4px;
+}
+
+.group-edit-form {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.group-edit-input {
+  width: 100%;
+}
+
+.group-edit-textarea {
+  resize: vertical;
+  font-family: inherit;
+}
+
+.group-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.group-role-badge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: var(--radius-full);
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background-color: rgba(255, 255, 255, 0.06);
+}
+.group-role-owner {
+  color: #fbbf24;
+  background-color: rgba(251, 191, 36, 0.12);
+}
+.group-role-moderator {
+  color: #93c5fd;
+  background-color: rgba(147, 197, 253, 0.12);
+}
+
+.group-info-danger-zone {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: var(--space-md);
+}
+
+.group-danger-btn {
+  color: #fca5a5;
+}
+.group-danger-btn:hover {
+  background-color: rgba(239, 68, 68, 0.14);
+}

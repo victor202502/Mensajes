@@ -1,5 +1,7 @@
 // frontend/src/components/Welcome.jsx
 import React from 'react';
+import { FiLogOut } from 'react-icons/fi';
+import './Welcome.css';
 
 // Acepta 'user' y 'onLogout' como props
 const Welcome = ({ user, onLogout }) => {
@@ -11,14 +13,15 @@ const Welcome = ({ user, onLogout }) => {
   };
 
   return (
-    <div>
+    <div className="welcome-card">
       {/* Muestra el nombre de usuario.
           Añadimos una comprobación por si user llega a ser null inesperadamente */}
       <h2>¡Bienvenido, {user ? user.username : 'Usuario'}!</h2>
       <p>Has accedido correctamente.</p>
       {/* Botón de Logout */}
-      <button onClick={handleLogoutClick}>
-        Logout
+      <button onClick={handleLogoutClick} className="btn btn-logout">
+        <FiLogOut />
+        <span>Logout</span>
       </button>
     </div>
   );

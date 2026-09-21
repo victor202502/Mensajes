@@ -1,9 +1,26 @@
 // frontend/src/components/MessageInput.jsx
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
+import { FiSend } from 'react-icons/fi';
+import './MessageInput.css';
 
 // Recibe onSendMessage que ahora solo espera el contenido, y disabled
-const MessageInput = ({ onSendMessage, disabled }) => {
+// NEU (Phase 3): onTyping ist optional — wird beim Tippen aufgerufen,
+// lokal gedrosselt (max. alle 2s), damit nicht bei jedem Tastendruck
+// ein Socket-Event verschickt wird.
+const MessageInput = ({ onSendMessage, disabled, onTyping }) => {
   const [message, setMessage] = useState('');
+  const lastTypingEmitRef = useRef(0);
+
+  const handleChange = (e) => {
+    setMessage(e.target.value);
+    if (onTyping) {
+      const now = Date.now();
+      if (now - lastTypingEmitRef.current > 2000) {
+        lastTypingEmitRef.current = now;
+        onTyping();
+      }
+    }
+  };
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -15,18 +32,18 @@ const MessageInput = ({ onSendMessage, disabled }) => {
   };
 
   return (
-    <form onSubmit={handleSubmit} className="message-input" style={{ display: 'flex', marginTop: '10px' }}>
+    <form onSubmit={handleSubmit} className="message-input">
       <input
         type="text"
         value={message}
-        onChange={(e) => setMessage(e.target.value)}
+        onChange={handleChange}
         placeholder="Escribe un mensaje..."
         disabled={disabled}
-        style={{ flexGrow: 1, padding: '10px', border: '1px solid #ccc', borderRadius: '4px 0 0 4px' }}
+        className="message-input-field"
         aria-label="Mensaje"
       />
-      <button type="submit" disabled={disabled || message.trim() === ''} style={{ padding: '10px 15px', border: '1px solid #007bff', backgroundColor: '#007bff', color: 'white', borderRadius: '0 4px 4px 0', cursor: 'pointer' }}>
-        Enviar
+      <button type="submit" disabled={disabled || message.trim() === ''} className="message-input-send">
+        <FiSend />
       </button>
     </form>
   );

@@ -1,6 +1,7 @@
 // frontend/src/components/LoginForm.jsx
 import React, { useState } from 'react';
 import axios from 'axios';
+import './AuthForm.css';
 
 // Usa la variable de entorno VITE_API_URL o un valor por defecto
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5001';
@@ -92,48 +93,46 @@ const LoginForm = ({ onLoginSuccess, onAuthFailure }) => {
 
   // Renderizado del componente
   return (
-    <div>
-      {/* El <h2> podría estar en App.jsx, si no, necesitas traducirlo también */}
-      {/* <h2>Anmelden</h2> */}
-      <form onSubmit={handleSubmit}>
-        <div>
-          {/* <<< CAMBIO: Texto de la etiqueta traducido >>> */}
-          <label htmlFor="login-username">Benutzername:</label>
-          <input
-            type="text"
-            id="login-username"
-            name="username" // Coincide con la clave en formData
-            value={formData.username}
-            onChange={handleChange}
-            required
-            disabled={isLoading} // Deshabilitado mientras carga
-            autoComplete="username" // Ayuda al navegador a autocompletar
-            aria-describedby={errorMessage ? "login-error-message" : undefined} // Asocia con el mensaje de error para accesibilidad
-          />
-        </div>
-        <div>
-          {/* <<< CAMBIO: Texto de la etiqueta traducido >>> */}
-          <label htmlFor="login-password">Passwort:</label>
-          <input
-            type="password"
-            id="login-password"
-            name="password" // Coincide con la clave en formData
-            value={formData.password}
-            onChange={handleChange}
-            required
-            disabled={isLoading} // Deshabilitado mientras carga
-            autoComplete="current-password" // Ayuda al navegador a autocompletar
-            aria-describedby={errorMessage ? "login-error-message" : undefined} // Asocia con el mensaje de error
-          />
-        </div>
-        <button type="submit" disabled={isLoading}>
-           {/* <<< CAMBIO: Textos del botón traducidos >>> */}
-           {isLoading ? 'Melde an...' : 'Anmelden'}
-        </button>
-      </form>
+    <form onSubmit={handleSubmit} className="auth-form">
+      <div className="form-group">
+        {/* <<< CAMBIO: Texto de la etiqueta traducido >>> */}
+        <label htmlFor="login-username">Benutzername:</label>
+        <input
+          type="text"
+          id="login-username"
+          name="username" // Coincide con la clave en formData
+          value={formData.username}
+          onChange={handleChange}
+          required
+          disabled={isLoading} // Deshabilitado mientras carga
+          autoComplete="username" // Ayuda al navegador a autocompletar
+          aria-describedby={errorMessage ? "login-error-message" : undefined} // Asocia con el mensaje de error para accesibilidad
+          className="form-input"
+        />
+      </div>
+      <div className="form-group">
+        {/* <<< CAMBIO: Texto de la etiqueta traducido >>> */}
+        <label htmlFor="login-password">Passwort:</label>
+        <input
+          type="password"
+          id="login-password"
+          name="password" // Coincide con la clave en formData
+          value={formData.password}
+          onChange={handleChange}
+          required
+          disabled={isLoading} // Deshabilitado mientras carga
+          autoComplete="current-password" // Ayuda al navegador a autocompletar
+          aria-describedby={errorMessage ? "login-error-message" : undefined} // Asocia con el mensaje de error
+          className="form-input"
+        />
+      </div>
+      <button type="submit" disabled={isLoading} className="form-submit-btn">
+         {/* <<< CAMBIO: Textos del botón traducidos >>> */}
+         {isLoading ? 'Melde an...' : 'Anmelden'}
+      </button>
       {/* Muestra el mensaje de error si existe (el mensaje ya está traducido en el estado) */}
-      {errorMessage && <p id="login-error-message" style={{ color: 'red', marginTop: '10px' }}>{errorMessage}</p>}
-    </div>
+      {errorMessage && <p id="login-error-message" className="form-message form-message-error">{errorMessage}</p>}
+    </form>
   );
 };
 
