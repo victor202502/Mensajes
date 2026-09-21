@@ -12,6 +12,9 @@ import SettingsMenu from './components/SettingsMenu'; // NEU (Phase 3)
 import GroupChatWindow from './components/GroupChatWindow'; // NEU (Phase 4)
 import GroupInfoPanel from './components/GroupInfoPanel'; // NEU (Phase 4)
 import CreateGroupModal from './components/CreateGroupModal'; // NEU (Phase 4)
+import ForwardMessageModal from './components/ForwardMessageModal'; // NEU (Phase 5)
+import FavoritesPanel from './components/FavoritesPanel'; // NEU (Phase 5)
+import GlobalSearchModal from './components/GlobalSearchModal'; // NEU (Phase 5)
 import Avatar from './components/Avatar';
 import { playNotificationSound } from './utils/notificationSound'; // NEU (Phase 3)
 import './App.css';
@@ -83,6 +86,12 @@ function App() {
   const activeGroupIdRef = useRef(null);
   useEffect(() => { activeGroupIdRef.current = activeGroupId; }, [activeGroupId]);
 
+  // --- NEU (Phase 5) ---
+  const [favorites, setFavorites] = useState([]);
+  const [forwardingMessage, setForwardingMessage] = useState(null);
+  const [isFavoritesPanelOpen, setIsFavoritesPanelOpen] = useState(false);
+  const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
+
   // --- Función de Logout (Memoizada con useCallback) ---
   const handleLogout = useCallback(() => {
     console.log("App: Realizando logout...");
@@ -122,6 +131,10 @@ function App() {
     setActiveGroupDetail(null);
     setIsCreateGroupModalOpen(false);
     setIsGroupInfoOpen(false);
+    setFavorites([]);
+    setForwardingMessage(null);
+    setIsFavoritesPanelOpen(false);
+    setIsSearchModalOpen(false);
   }, []);
 
   // --- Efecto para Restaurar Sesión al Cargar ---
@@ -550,6 +563,82 @@ function App() {
     runGroupAction('delete', `/api/groups/${groupId}`);
   }, [runGroupAction]);
 
+  // --- NEU (Phase 5) ---
+  const fetchFavorites = useCallback(async () => {
+    const currentToken = localStorage.getItem('authToken');
+    if (!currentToken) return;
+    try {
+      const response = await axios.get(`${API_URL}/api/favorites`, { headers: { Authorization: `Bearer ${currentToken}` } });
+      setFavorites(response.data || []);
+    } catch (error) {
+      console.error("App: Fehler beim Laden der Favoriten:", error.response?.data?.message || error.message);
+      if (error.response?.status === 401) handleLogout();
+    }
+  }, [handleLogout]);
+
+  const editMessage = useCallback((messageId, content) => {
+    if (socketRef.current?.connected) socketRef.current.emit('editMessage', { messageId, content });
+  }, []);
+  const deleteMessage = useCallback((messageId) => {
+    if (socketRef.current?.connected) socketRef.current.emit('deleteMessage', { messageId });
+  }, []);
+  const editGroupMessage = useCallback((messageId, content) => {
+    if (socketRef.current?.connected) socketRef.current.emit('editGroupMessage', { messageId, content });
+  }, []);
+  const deleteGroupMessage = useCallback((messageId) => {
+    if (socketRef.current?.connected) socketRef.current.emit('deleteGroupMessage', { messageId });
+  }, []);
+
+  const pinMessage = useCallback((messageId) => {
+    const t = localStorage.getItem('authToken'); if (!t) return;
+    axios.post(`${API_URL}/api/messages/${messageId}/pin`, {}, { headers: { Authorization: `Bearer ${t}` } }).catch((e) => console.error("App: Fehler beim Anheften:", e.response?.data?.message || e.message));
+  }, []);
+  const unpinMessage = useCallback((messageId) => {
+    const t = localStorage.getItem('authToken'); if (!t) return;
+    axios.post(`${API_URL}/api/messages/${messageId}/unpin`, {}, { headers: { Authorization: `Bearer ${t}` } }).catch((e) => console.error("App: Fehler beim Lösen:", e.response?.data?.message || e.message));
+  }, []);
+  const pinGroupMessage = useCallback((groupId, messageId) => {
+    const t = localStorage.getItem('authToken'); if (!t) return;
+    axios.post(`${API_URL}/api/groups/${groupId}/messages/${messageId}/pin`, {}, { headers: { Authorization: `Bearer ${t}` } }).catch((e) => console.error("App: Fehler beim Anheften:", e.response?.data?.message || e.message));
+  }, []);
+  const unpinGroupMessage = useCallback((groupId, messageId) => {
+    const t = localStorage.getItem('authToken'); if (!t) return;
+    axios.post(`${API_URL}/api/groups/${groupId}/messages/${messageId}/unpin`, {}, { headers: { Authorization: `Bearer ${t}` } }).catch((e) => console.error("App: Fehler beim Lösen:", e.response?.data?.message || e.message));
+  }, []);
+
+  const toggleFavorite = useCallback((messageType, messageId, isCurrentlyFavorited) => {
+    setFavorites((prev) => (
+      isCurrentlyFavorited
+        ? prev.filter((f) => !(f.messageType === messageType && f.messageId === messageId))
+        : [...prev, { messageType, messageId }]
+    ));
+    const t = localStorage.getItem('authToken'); if (!t) return;
+    const req = isCurrentlyFavorited
+      ? axios.delete(`${API_URL}/api/favorites/${messageType}/${messageId}`, { headers: { Authorization: `Bearer ${t}` } })
+      : axios.post(`${API_URL}/api/favorites`, { messageType, messageId }, { headers: { Authorization: `Bearer ${t}` } });
+    req.catch((e) => console.error("App: Fehler beim Aktualisieren der Favoriten:", e.response?.data?.message || e.message));
+  }, []);
+
+  const forwardMessage = useCallback((destination) => {
+    if (!forwardingMessage) return;
+    if (destination.isGroup) {
+      if (socketRef.current?.connected) {
+        socketRef.current.emit('sendGroupMessage', { groupId: destination.id, content: forwardingMessage.content, forwardedFromUsername: forwardingMessage.forwardedFromUsername });
+      }
+    } else if (socketRef.current?.connected) {
+      socketRef.current.emit('sendMessage', { recipientUsername: destination.username, content: forwardingMessage.content, forwardedFromUsername: forwardingMessage.forwardedFromUsername });
+    }
+    setForwardingMessage(null);
+  }, [forwardingMessage]);
+
+  const jumpToDirectChatFromSearch = useCallback((user) => {
+    setActiveGroupId(null);
+    setSelectedChatUser(user);
+  }, []);
+  const jumpToGroupFromSearch = useCallback((groupId) => {
+    handleSelectGroup(groupId);
+  }, [handleSelectGroup]);
+
   // --- Efecto Principal para Gestionar el Socket ---
   useEffect(() => {
     if (user && token) {
@@ -572,6 +661,7 @@ function App() {
         fetchGroups(); // NEU (Phase 4)
         fetchGroupMessages(); // NEU (Phase 4)
         fetchGroupReadState(); // NEU (Phase 4)
+        fetchFavorites(); // NEU (Phase 5)
       };
       const handleDisconnect = (reason) => {
         console.log('App: Socket getrennt:', reason); // Log geändert
@@ -713,6 +803,31 @@ function App() {
         }
       };
 
+      const handleMessageEdited = ({ messageId, content, editedAt }) => {
+        setAllMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, content, editedAt } : m)));
+      };
+      const handleMessageDeleted = ({ messageId }) => {
+        setAllMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, content: null, deletedAt: new Date().toISOString() } : m)));
+      };
+      const handleGroupMessageEdited = ({ messageId, content, editedAt }) => {
+        setGroupMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, content, editedAt } : m)));
+      };
+      const handleGroupMessageDeleted = ({ messageId }) => {
+        setGroupMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, content: null, deletedAt: new Date().toISOString() } : m)));
+      };
+      const handleMessagePinned = ({ messageId, pinnedAt }) => {
+        setAllMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, pinnedAt } : m)));
+      };
+      const handleMessageUnpinned = ({ messageId }) => {
+        setAllMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, pinnedAt: null } : m)));
+      };
+      const handleGroupMessagePinned = ({ messageId, pinnedAt }) => {
+        setGroupMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, pinnedAt } : m)));
+      };
+      const handleGroupMessageUnpinned = ({ messageId }) => {
+        setGroupMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, pinnedAt: null } : m)));
+      };
+
       socket.on('connect', handleConnect);
       socket.on('disconnect', handleDisconnect);
       socket.on('connect_error', handleConnectError);
@@ -725,6 +840,14 @@ function App() {
       socket.on('newGroupMessage', handleNewGroupMessage); // NEU (Phase 4)
       socket.on('groupUpdated', handleGroupUpdated); // NEU (Phase 4)
       socket.on('groupDeleted', handleGroupDeleted); // NEU (Phase 4)
+      socket.on('messageEdited', handleMessageEdited); // NEU (Phase 5)
+      socket.on('messageDeleted', handleMessageDeleted); // NEU (Phase 5)
+      socket.on('groupMessageEdited', handleGroupMessageEdited); // NEU (Phase 5)
+      socket.on('groupMessageDeleted', handleGroupMessageDeleted); // NEU (Phase 5)
+      socket.on('messagePinned', handleMessagePinned); // NEU (Phase 5)
+      socket.on('messageUnpinned', handleMessageUnpinned); // NEU (Phase 5)
+      socket.on('groupMessagePinned', handleGroupMessagePinned); // NEU (Phase 5)
+      socket.on('groupMessageUnpinned', handleGroupMessageUnpinned); // NEU (Phase 5)
 
       return () => {
         console.log("App: Socket-Effekt wird bereinigt..."); // Log geändert
@@ -740,6 +863,14 @@ function App() {
         socket.off('newGroupMessage', handleNewGroupMessage); // NEU (Phase 4)
         socket.off('groupUpdated', handleGroupUpdated); // NEU (Phase 4)
         socket.off('groupDeleted', handleGroupDeleted); // NEU (Phase 4)
+        socket.off('messageEdited', handleMessageEdited); // NEU (Phase 5)
+        socket.off('messageDeleted', handleMessageDeleted); // NEU (Phase 5)
+        socket.off('groupMessageEdited', handleGroupMessageEdited); // NEU (Phase 5)
+        socket.off('groupMessageDeleted', handleGroupMessageDeleted); // NEU (Phase 5)
+        socket.off('messagePinned', handleMessagePinned); // NEU (Phase 5)
+        socket.off('messageUnpinned', handleMessageUnpinned); // NEU (Phase 5)
+        socket.off('groupMessagePinned', handleGroupMessagePinned); // NEU (Phase 5)
+        socket.off('groupMessageUnpinned', handleGroupMessageUnpinned); // NEU (Phase 5)
         if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current); // NEU (Phase 3)
         if (socket.connected) socket.disconnect();
         socketRef.current = null;
@@ -754,7 +885,7 @@ function App() {
       // <<< CAMBIO: Estado traducido >>>
       setSocketStatusMessage('Getrennt.');
     }
-  }, [user, token, handleLogout, fetchUsers, fetchMessages, fetchOnlineStatus, fetchUnreadCounts, markConversationRead, fetchContactsOverview, fetchGroups, fetchGroupMessages, fetchGroupReadState, fetchGroupDetail, markGroupRead]);
+  }, [user, token, handleLogout, fetchUsers, fetchMessages, fetchOnlineStatus, fetchUnreadCounts, markConversationRead, fetchContactsOverview, fetchGroups, fetchGroupMessages, fetchGroupReadState, fetchGroupDetail, markGroupRead, fetchFavorites]);
 
   // --- Efecto para Filtrar Mensajes (Sin cambios) ---
   useEffect(() => {
@@ -880,10 +1011,10 @@ function App() {
         setSelectedChatUser(userToChat);
     }
   };
-  const handleSendMessage = ({ recipientUsername, content }) => {
+  const handleSendMessage = ({ recipientUsername, content, replyToId }) => {
     const currentSocket = socketRef.current;
     if (currentSocket?.connected && content && recipientUsername) {
-       currentSocket.emit('sendMessage', { recipientUsername, content });
+       currentSocket.emit('sendMessage', { recipientUsername, content, replyToId });
        // <<< CAMBIO: Estado traducido >>>
        const statusAfterTimeout = currentSocket.connected ? 'Verbunden.' : 'Getrennt.';
        // <<< CAMBIO: Estado traducido >>>
@@ -921,6 +1052,9 @@ function App() {
   const partnerLastSeenAt = selectedChatUser
     ? contacts.find((c) => c.id === selectedChatUser.id)?.lastSeenAt || null
     : null;
+
+  // --- NEU (Phase 5): Favoriten als Set für schnellen Zugriff (`type:id`) ---
+  const favoriteIds = new Set(favorites.map((f) => `${f.messageType}:${f.messageId}`));
 
   // --- Renderizado Condicional ---
 
@@ -965,6 +1099,8 @@ function App() {
          onSelectGroup={handleSelectGroup}
          activeGroupId={activeGroupId}
          onOpenCreateGroup={() => setIsCreateGroupModalOpen(true)}
+         onOpenSearch={() => setIsSearchModalOpen(true)}
+         onOpenFavorites={() => setIsFavoritesPanelOpen(true)}
       />
       <ContactsPanel
          isOpen={isContactsPanelOpen}
@@ -999,6 +1135,33 @@ function App() {
          onChangeRole={changeGroupMemberRole}
          onLeaveGroup={leaveGroup}
          onDeleteGroup={deleteGroup}
+      />
+      {/* NEU (Phase 5) */}
+      <ForwardMessageModal
+         isOpen={!!forwardingMessage}
+         onClose={() => setForwardingMessage(null)}
+         conversations={allConversationItems}
+         onSelectDestination={forwardMessage}
+      />
+      <FavoritesPanel
+         isOpen={isFavoritesPanelOpen}
+         onClose={() => setIsFavoritesPanelOpen(false)}
+         favorites={favorites}
+         allMessages={allMessages}
+         groupMessages={groupMessages}
+         onToggleFavorite={toggleFavorite}
+      />
+      <GlobalSearchModal
+         isOpen={isSearchModalOpen}
+         onClose={() => setIsSearchModalOpen(false)}
+         allMessages={allMessages}
+         groupMessages={groupMessages}
+         groups={groups}
+         usersList={usersList}
+         contacts={contacts}
+         onJumpToDirectChat={jumpToDirectChatFromSearch}
+         onJumpToGroup={jumpToGroupFromSearch}
+         onSendContactRequest={sendContactRequest}
       />
       <div className="chat-area">
          <div className="app-topbar">
@@ -1035,6 +1198,13 @@ function App() {
              onlineMemberCount={activeGroupOnlineCount}
              onBackToList={() => setActiveGroupId(null)}
              onOpenInfo={() => setIsGroupInfoOpen(true)}
+             onEditMessage={editGroupMessage}
+             onDeleteMessage={deleteGroupMessage}
+             onPinMessage={pinGroupMessage}
+             onUnpinMessage={unpinGroupMessage}
+             onForwardMessage={setForwardingMessage}
+             favoriteIds={favoriteIds}
+             onToggleFavorite={toggleFavorite}
            />
          ) : (
            <ChatWindow
@@ -1051,6 +1221,13 @@ function App() {
              onTyping={handleTyping}
              isPartnerTyping={isPartnerTyping}
              partnerLastSeenAt={partnerLastSeenAt}
+             onEditMessage={editMessage}
+             onDeleteMessage={deleteMessage}
+             onPinMessage={pinMessage}
+             onUnpinMessage={unpinMessage}
+             onForwardMessage={setForwardingMessage}
+             favoriteIds={favoriteIds}
+             onToggleFavorite={toggleFavorite}
            />
          )}
       </div>

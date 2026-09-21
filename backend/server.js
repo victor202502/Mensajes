@@ -110,10 +110,14 @@ io.on('connection', (socket) => {
    })();
 
    // Escuchar evento 'sendMessage' { recipientUsername, content }
-   socket.on('sendMessage', async ({ recipientUsername, content }) => {
+   socket.on('sendMessage', async ({ recipientUsername, content, replyToId, forwardedFromUsername }) => {
      console.log(`Mensaje recibido de ${username} (ID: ${userId}) para ${recipientUsername}: ${content}`);
      const trimmedContent = content?.trim();
      const trimmedRecipient = recipientUsername?.trim();
+     // <<< NEU (Phase 5): beide optional, unverändertes Verhalten wenn nicht gesetzt >>>
+     const parsedReplyToIdRaw = parseInt(replyToId, 10);
+     const parsedReplyToId = Number.isInteger(parsedReplyToIdRaw) ? parsedReplyToIdRaw : null;
+     const trimmedForwardedFrom = typeof forwardedFromUsername === 'string' ? forwardedFromUsername.trim().slice(0, 50) || null : null;
 
      // Validaciones
      if (!trimmedRecipient) {
@@ -154,9 +158,13 @@ io.on('connection', (socket) => {
        }
 
        // 2. Guardar mensaje en DB (con recipient_id)
+       // <<< NEU (Phase 5): reply_to_id/forwarded_from_username sind nullable,
+       //     bestehende Aufrufe ohne diese Felder verhalten sich exakt wie zuvor >>>
        const newMessage = await db.query(
-         'INSERT INTO messages (content, sender_id, recipient_id) VALUES ($1, $2, $3) RETURNING id, content, sender_id, recipient_id, created_at',
-         [trimmedContent, userId, recipientId] // Usa userId del socket autenticado
+         `INSERT INTO messages (content, sender_id, recipient_id, reply_to_id, forwarded_from_username)
+          VALUES ($1, $2, $3, $4, $5)
+          RETURNING id, content, sender_id, recipient_id, created_at, reply_to_id, forwarded_from_username`,
+         [trimmedContent, userId, recipientId, parsedReplyToId, trimmedForwardedFrom]
        );
 
        // 3. Preparar mensaje para emitir (incluyendo info completa de sender/recipient)
@@ -167,6 +175,12 @@ io.on('connection', (socket) => {
          // <<< NEU (Phase 3): gleiche Form wie die Nachrichten aus /api/messages >>>
          deliveredAt: null,
          readAt: null,
+         // <<< NEU (Phase 5): gleiche Form wie /api/messages >>>
+         editedAt: null,
+         deletedAt: null,
+         pinnedAt: null,
+         replyToId: newMessage.rows[0].reply_to_id,
+         forwardedFromUsername: newMessage.rows[0].forwarded_from_username,
          sender: { id: userId, username: username }, // Usa datos del socket
          recipient: { id: recipientId, username: trimmedRecipient } // Usa datos encontrados
        };
@@ -227,36 +241,146 @@ io.on('connection', (socket) => {
    });
 
    // <<< NEU (Phase 4): Nachricht an eine Gruppe senden >>>
-   socket.on('sendGroupMessage', async ({ groupId, content }) => {
+   socket.on('sendGroupMessage', async ({ groupId, content, replyToId, forwardedFromUsername }) => {
      const gId = parseInt(groupId, 10);
      const trimmedContent = content?.trim();
+     const parsedReplyToIdRaw = parseInt(replyToId, 10);
+     const parsedReplyToId = Number.isInteger(parsedReplyToIdRaw) ? parsedReplyToIdRaw : null;
+     const trimmedForwardedFrom = typeof forwardedFromUsername === 'string' ? forwardedFromUsername.trim().slice(0, 50) || null : null;
      if (!Number.isInteger(gId) || !trimmedContent) {
        return socket.emit('messageError', { error: 'Ungültige Gruppennachricht.' });
      }
      try {
-       // TEMPORÄR (Debug Phase 4): siehe Analysepunkt 5/8.
-       console.log('[DEBUG Phase 4] sendGroupMessage: userId (Socket) =', userId, ', gId (empfangen) =', gId);
        const role = await groupPermissions.getMemberRole(gId, userId);
-       console.log('[DEBUG Phase 4] sendGroupMessage: getMemberRole ergab =', role);
        if (!role) {
          return socket.emit('messageError', { error: 'Du bist kein Mitglied dieser Gruppe.' });
        }
        const inserted = await db.query(
-         `INSERT INTO group_messages (group_id, sender_id, content) VALUES ($1, $2, $3)
-          RETURNING id, created_at`,
-         [gId, userId, trimmedContent]
+         `INSERT INTO group_messages (group_id, sender_id, content, reply_to_id, forwarded_from_username)
+          VALUES ($1, $2, $3, $4, $5)
+          RETURNING id, created_at, reply_to_id, forwarded_from_username`,
+         [gId, userId, trimmedContent, parsedReplyToId, trimmedForwardedFrom]
        );
        const groupMessageToSend = {
          id: inserted.rows[0].id,
          groupId: gId,
          content: trimmedContent,
          createdAt: inserted.rows[0].created_at,
+         editedAt: null,
+         deletedAt: null,
+         pinnedAt: null,
+         replyToId: inserted.rows[0].reply_to_id,
+         forwardedFromUsername: inserted.rows[0].forwarded_from_username,
          sender: { id: userId, username },
        };
        io.to(`group_${gId}`).emit('newGroupMessage', groupMessageToSend);
      } catch (err) {
        console.error(`Error al enviar mensaje de ${username} al grupo ${gId}:`, err);
        socket.emit('messageError', { error: 'Fehler beim Senden der Gruppennachricht.' });
+     }
+   });
+
+   // <<< NEU (Phase 5): eigene 1:1-Nachricht bearbeiten >>>
+   socket.on('editMessage', async ({ messageId, content }) => {
+     const id = parseInt(messageId, 10);
+     const trimmedContent = content?.trim();
+     if (!Number.isInteger(id) || !trimmedContent) {
+       return socket.emit('messageError', { error: 'Ungültige Bearbeitung.' });
+     }
+     try {
+       const result = await db.query(
+         `UPDATE messages SET content = $1, edited_at = NOW()
+          WHERE id = $2 AND sender_id = $3 AND deleted_at IS NULL
+          RETURNING id, content, edited_at, sender_id, recipient_id`,
+         [trimmedContent, id, userId]
+       );
+       if (result.rows.length === 0) {
+         return socket.emit('messageError', { error: 'Nachricht kann nicht bearbeitet werden.' });
+       }
+       const row = result.rows[0];
+       const payload = { messageId: row.id, content: row.content, editedAt: row.edited_at };
+       io.to(row.sender_id.toString()).emit('messageEdited', payload);
+       io.to(row.recipient_id.toString()).emit('messageEdited', payload);
+     } catch (err) {
+       console.error(`Error al editar mensaje ${id} (Usuario ${userId}):`, err);
+       socket.emit('messageError', { error: 'Fehler beim Bearbeiten der Nachricht.' });
+     }
+   });
+
+   // <<< NEU (Phase 5): eigene 1:1-Nachricht löschen (weich) >>>
+   socket.on('deleteMessage', async ({ messageId }) => {
+     const id = parseInt(messageId, 10);
+     if (!Number.isInteger(id)) {
+       return socket.emit('messageError', { error: 'Ungültige Löschanfrage.' });
+     }
+     try {
+       const result = await db.query(
+         `UPDATE messages SET content = NULL, deleted_at = NOW()
+          WHERE id = $1 AND sender_id = $2 AND deleted_at IS NULL
+          RETURNING id, sender_id, recipient_id`,
+         [id, userId]
+       );
+       if (result.rows.length === 0) {
+         return socket.emit('messageError', { error: 'Nachricht kann nicht gelöscht werden.' });
+       }
+       const row = result.rows[0];
+       const payload = { messageId: row.id };
+       io.to(row.sender_id.toString()).emit('messageDeleted', payload);
+       io.to(row.recipient_id.toString()).emit('messageDeleted', payload);
+     } catch (err) {
+       console.error(`Error al eliminar mensaje ${id} (Usuario ${userId}):`, err);
+       socket.emit('messageError', { error: 'Fehler beim Löschen der Nachricht.' });
+     }
+   });
+
+   // <<< NEU (Phase 5): eigene Gruppennachricht bearbeiten >>>
+   socket.on('editGroupMessage', async ({ messageId, content }) => {
+     const id = parseInt(messageId, 10);
+     const trimmedContent = content?.trim();
+     if (!Number.isInteger(id) || !trimmedContent) {
+       return socket.emit('messageError', { error: 'Ungültige Bearbeitung.' });
+     }
+     try {
+       const result = await db.query(
+         `UPDATE group_messages SET content = $1, edited_at = NOW()
+          WHERE id = $2 AND sender_id = $3 AND deleted_at IS NULL
+          RETURNING id, group_id, content, edited_at`,
+         [trimmedContent, id, userId]
+       );
+       if (result.rows.length === 0) {
+         return socket.emit('messageError', { error: 'Nachricht kann nicht bearbeitet werden.' });
+       }
+       const row = result.rows[0];
+       io.to(`group_${row.group_id}`).emit('groupMessageEdited', {
+         messageId: row.id, groupId: row.group_id, content: row.content, editedAt: row.edited_at,
+       });
+     } catch (err) {
+       console.error(`Error al editar mensaje de grupo ${id} (Usuario ${userId}):`, err);
+       socket.emit('messageError', { error: 'Fehler beim Bearbeiten der Nachricht.' });
+     }
+   });
+
+   // <<< NEU (Phase 5): eigene Gruppennachricht löschen (weich) >>>
+   socket.on('deleteGroupMessage', async ({ messageId }) => {
+     const id = parseInt(messageId, 10);
+     if (!Number.isInteger(id)) {
+       return socket.emit('messageError', { error: 'Ungültige Löschanfrage.' });
+     }
+     try {
+       const result = await db.query(
+         `UPDATE group_messages SET content = NULL, deleted_at = NOW()
+          WHERE id = $1 AND sender_id = $2 AND deleted_at IS NULL
+          RETURNING id, group_id`,
+         [id, userId]
+       );
+       if (result.rows.length === 0) {
+         return socket.emit('messageError', { error: 'Nachricht kann nicht gelöscht werden.' });
+       }
+       const row = result.rows[0];
+       io.to(`group_${row.group_id}`).emit('groupMessageDeleted', { messageId: row.id, groupId: row.group_id });
+     } catch (err) {
+       console.error(`Error al eliminar mensaje de grupo ${id} (Usuario ${userId}):`, err);
+       socket.emit('messageError', { error: 'Fehler beim Löschen der Nachricht.' });
      }
    });
 
@@ -409,6 +533,9 @@ app.get('/api/messages', authMiddleware, async (req, res) => {
        const result = await db.query(`
           SELECT m.id, m.content, m.created_at AS "createdAt",
                  m.delivered_at AS "deliveredAt", m.read_at AS "readAt",
+                 m.edited_at AS "editedAt", m.deleted_at AS "deletedAt",
+                 m.reply_to_id AS "replyToId", m.forwarded_from_username AS "forwardedFromUsername",
+                 m.pinned_at AS "pinnedAt",
                  s.id AS sender_id, s.username AS sender_username,
                  r.id AS recipient_id, r.username AS recipient_username
           FROM messages m
@@ -424,6 +551,10 @@ app.get('/api/messages', authMiddleware, async (req, res) => {
           id: row.id, content: row.content, createdAt: row.createdAt,
           // <<< NEU (Phase 3): Zustellungs-/Lesestatus, rein additiv >>>
           deliveredAt: row.deliveredAt, readAt: row.readAt,
+          // <<< NEU (Phase 5): rein additiv >>>
+          editedAt: row.editedAt, deletedAt: row.deletedAt,
+          replyToId: row.replyToId, forwardedFromUsername: row.forwardedFromUsername,
+          pinnedAt: row.pinnedAt,
           sender: { id: row.sender_id, username: row.sender_username },
           // Incluye destinatario solo si existe en la fila (gracias al LEFT JOIN y la condición WHERE)
           recipient: row.recipient_id ? { id: row.recipient_id, username: row.recipient_username } : null
@@ -786,6 +917,9 @@ app.get('/api/groups/messages', authMiddleware, async (req, res) => {
   try {
     const result = await db.query(
       `SELECT gm.id, gm.group_id AS "groupId", gm.content, gm.created_at AS "createdAt",
+              gm.edited_at AS "editedAt", gm.deleted_at AS "deletedAt",
+              gm.reply_to_id AS "replyToId", gm.forwarded_from_username AS "forwardedFromUsername",
+              gm.pinned_at AS "pinnedAt",
               u.id AS sender_id, u.username AS sender_username
        FROM group_messages gm
        JOIN users u ON u.id = gm.sender_id
@@ -798,6 +932,11 @@ app.get('/api/groups/messages', authMiddleware, async (req, res) => {
       groupId: row.groupId,
       content: row.content,
       createdAt: row.createdAt,
+      editedAt: row.editedAt,
+      deletedAt: row.deletedAt,
+      replyToId: row.replyToId,
+      forwardedFromUsername: row.forwardedFromUsername,
+      pinnedAt: row.pinnedAt,
       sender: { id: row.sender_id, username: row.sender_username },
     }));
     res.status(200).json(messages);
@@ -875,12 +1014,6 @@ app.post('/api/groups', authMiddleware, async (req, res) => {
     ? req.body.memberIds.map((id) => parseInt(id, 10)).filter((id) => Number.isInteger(id))
     : [];
 
-  // TEMPORÄR (Debug Phase 4): siehe Analysepunkt 8 — bitte vor dem Entfernen
-  // bestätigen, dass "ausgewählte memberIds" und "tatsächlich eingefügt" für
-  // jeden Testlauf exakt übereinstimmen.
-  console.log('[DEBUG Phase 4] POST /api/groups: authentifizierter Benutzer =', currentUserId, req.user.username);
-  console.log('[DEBUG Phase 4] POST /api/groups: von Express empfangene memberIds =', memberIds);
-
   if (!name || name.length < 2) {
     return res.status(400).json({ message: 'Der Gruppenname muss mindestens 2 Zeichen lang sein.' });
   }
@@ -900,13 +1033,11 @@ app.post('/api/groups', authMiddleware, async (req, res) => {
         [name, description, avatarEmoji, currentUserId]
       );
       const newGroupId = groupResult.rows[0].id;
-      console.log('[DEBUG Phase 4] POST /api/groups: neue groupId =', newGroupId); // TEMPORÄR (Debug Phase 4)
 
-      const ownerResult = await txDb.query(
-        `INSERT INTO group_members (group_id, user_id, role) VALUES ($1, $2, 'owner') RETURNING user_id, role`,
+      await txDb.query(
+        `INSERT INTO group_members (group_id, user_id, role) VALUES ($1, $2, 'owner')`,
         [newGroupId, currentUserId]
       );
-      console.log('[DEBUG Phase 4] POST /api/groups: Owner-Zeile eingefügt =', ownerResult.rows[0]); // TEMPORÄR (Debug Phase 4)
 
       // Nur Kontakte des Erstellers dürfen initial hinzugefügt werden (gleiche
       // Vertrauensgrenze wie beim späteren Einladen, siehe unten).
@@ -922,14 +1053,10 @@ app.post('/api/groups', authMiddleware, async (req, res) => {
             [newGroupId, memberId]
           );
           insertedMemberIds.push(memberId);
-        } else {
-          console.warn('[DEBUG Phase 4] POST /api/groups: memberId', memberId, 'übersprungen (kein akzeptierter Kontakt von', currentUserId, ')');
         }
       }
       return newGroupId;
     });
-
-    console.log('[DEBUG Phase 4] POST /api/groups: tatsächlich eingefügte Mitglieder-IDs =', insertedMemberIds); // TEMPORÄR (Debug Phase 4)
 
     // Socket-Räume erst NACH erfolgreichem Commit beitreten lassen (sonst
     // könnten Räume für eine Gruppe vergeben werden, die durch einen
@@ -1157,6 +1284,176 @@ app.post('/api/groups/:groupId/read', authMiddleware, async (req, res) => {
   }
 });
 
+
+
+
+// -----------------------------------------------------------------------------
+// 9e. NEU (Phase 5) -- Nachrichten anheften und Favoriten
+// Rein additiv: keine bestehende Route wird veraendert oder entfernt.
+// -----------------------------------------------------------------------------
+
+app.post('/api/messages/:messageId/pin', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const messageId = parseInt(req.params.messageId, 10);
+  if (!Number.isInteger(messageId)) {
+    return res.status(400).json({ message: 'Ungueltige messageId.' });
+  }
+  try {
+    const result = await db.query(
+      `UPDATE messages SET pinned_at = NOW()
+       WHERE id = $1 AND (sender_id = $2 OR recipient_id = $2) AND deleted_at IS NULL
+       RETURNING id, sender_id, recipient_id, pinned_at`,
+      [messageId, currentUserId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Nachricht nicht gefunden.' });
+    }
+    const row = result.rows[0];
+    const payload = { messageId: row.id, pinnedAt: row.pinned_at };
+    io.to(row.sender_id.toString()).emit('messagePinned', payload);
+    io.to(row.recipient_id.toString()).emit('messagePinned', payload);
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al fijar mensaje ${messageId} (Usuario ${currentUserId}):`, err);
+    res.status(500).json({ message: 'Fehler beim Anheften der Nachricht.' });
+  }
+});
+
+app.post('/api/messages/:messageId/unpin', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const messageId = parseInt(req.params.messageId, 10);
+  if (!Number.isInteger(messageId)) {
+    return res.status(400).json({ message: 'Ungueltige messageId.' });
+  }
+  try {
+    const result = await db.query(
+      `UPDATE messages SET pinned_at = NULL
+       WHERE id = $1 AND (sender_id = $2 OR recipient_id = $2)
+       RETURNING id, sender_id, recipient_id`,
+      [messageId, currentUserId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Nachricht nicht gefunden.' });
+    }
+    const row = result.rows[0];
+    const payload = { messageId: row.id };
+    io.to(row.sender_id.toString()).emit('messageUnpinned', payload);
+    io.to(row.recipient_id.toString()).emit('messageUnpinned', payload);
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al desfijar mensaje ${messageId} (Usuario ${currentUserId}):`, err);
+    res.status(500).json({ message: 'Fehler beim Loesen der Nachricht.' });
+  }
+});
+
+app.post('/api/groups/:groupId/messages/:messageId/pin', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const groupId = parseInt(req.params.groupId, 10);
+  const messageId = parseInt(req.params.messageId, 10);
+  if (!Number.isInteger(groupId) || !Number.isInteger(messageId)) {
+    return res.status(400).json({ message: 'Ungueltige ID.' });
+  }
+  try {
+    const role = await groupPermissions.getMemberRole(groupId, currentUserId);
+    if (!groupPermissions.canManageGroup(role)) {
+      return res.status(403).json({ message: 'Keine Berechtigung, Nachrichten anzuheften.' });
+    }
+    const result = await db.query(
+      `UPDATE group_messages SET pinned_at = NOW()
+       WHERE id = $1 AND group_id = $2 AND deleted_at IS NULL
+       RETURNING id, pinned_at`,
+      [messageId, groupId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Nachricht nicht gefunden.' });
+    }
+    io.to(`group_${groupId}`).emit('groupMessagePinned', { messageId, groupId, pinnedAt: result.rows[0].pinned_at });
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al fijar mensaje de grupo ${messageId} (grupo ${groupId}):`, err);
+    res.status(500).json({ message: 'Fehler beim Anheften der Nachricht.' });
+  }
+});
+
+app.post('/api/groups/:groupId/messages/:messageId/unpin', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const groupId = parseInt(req.params.groupId, 10);
+  const messageId = parseInt(req.params.messageId, 10);
+  if (!Number.isInteger(groupId) || !Number.isInteger(messageId)) {
+    return res.status(400).json({ message: 'Ungueltige ID.' });
+  }
+  try {
+    const role = await groupPermissions.getMemberRole(groupId, currentUserId);
+    if (!groupPermissions.canManageGroup(role)) {
+      return res.status(403).json({ message: 'Keine Berechtigung, Nachrichten zu loesen.' });
+    }
+    const result = await db.query(
+      `UPDATE group_messages SET pinned_at = NULL WHERE id = $1 AND group_id = $2 RETURNING id`,
+      [messageId, groupId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Nachricht nicht gefunden.' });
+    }
+    io.to(`group_${groupId}`).emit('groupMessageUnpinned', { messageId, groupId });
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al desfijar mensaje de grupo ${messageId} (grupo ${groupId}):`, err);
+    res.status(500).json({ message: 'Fehler beim Loesen der Nachricht.' });
+  }
+});
+
+app.get('/api/favorites', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  try {
+    const result = await db.query(
+      `SELECT message_type AS "messageType", message_id AS "messageId" FROM message_favorites WHERE user_id = $1`,
+      [currentUserId]
+    );
+    res.status(200).json(result.rows);
+  } catch (err) {
+    console.error(`Error al obtener favoritos de Usuario ID ${currentUserId}:`, err);
+    res.status(500).json({ message: 'Fehler beim Abrufen der Favoriten.' });
+  }
+});
+
+app.post('/api/favorites', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const messageType = req.body?.messageType;
+  const messageId = parseInt(req.body?.messageId, 10);
+  if ((messageType !== 'direct' && messageType !== 'group') || !Number.isInteger(messageId)) {
+    return res.status(400).json({ message: "messageType muss 'direct' oder 'group' sein, messageId muss gueltig sein." });
+  }
+  try {
+    await db.query(
+      `INSERT INTO message_favorites (user_id, message_type, message_id) VALUES ($1, $2, $3)
+       ON CONFLICT (user_id, message_type, message_id) DO NOTHING`,
+      [currentUserId, messageType, messageId]
+    );
+    res.status(201).json({ success: true });
+  } catch (err) {
+    console.error(`Error al anadir favorito (Usuario ${currentUserId}):`, err);
+    res.status(500).json({ message: 'Fehler beim Hinzufuegen zu den Favoriten.' });
+  }
+});
+
+app.delete('/api/favorites/:messageType/:messageId', authMiddleware, async (req, res) => {
+  const currentUserId = req.user.userId;
+  const messageType = req.params.messageType;
+  const messageId = parseInt(req.params.messageId, 10);
+  if ((messageType !== 'direct' && messageType !== 'group') || !Number.isInteger(messageId)) {
+    return res.status(400).json({ message: "Ungueltiger messageType oder messageId." });
+  }
+  try {
+    await db.query(
+      `DELETE FROM message_favorites WHERE user_id = $1 AND message_type = $2 AND message_id = $3`,
+      [currentUserId, messageType, messageId]
+    );
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error(`Error al eliminar favorito (Usuario ${currentUserId}):`, err);
+    res.status(500).json({ message: 'Fehler beim Entfernen aus den Favoriten.' });
+  }
+});
 
 // -----------------------------------------------------------------------------
 // 10. Inicio del Servidor
